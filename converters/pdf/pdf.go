@@ -14,6 +14,7 @@ import (
 )
 
 const priority = 14
+const syntheticPageHeadingMaxChars = 2400
 
 var (
 	pdfExtensions = map[string]struct{}{
@@ -169,6 +170,9 @@ func (pureGoExtractor) Extract(ctx context.Context, data []byte) (string, error)
 			} else {
 				section = section + "\n" + strings.Join(assets, "\n")
 			}
+		}
+		if section != "" && len(section) <= syntheticPageHeadingMaxChars {
+			section = fmt.Sprintf("# Page %d\n\n%s", pageNum, section)
 		}
 		if out.Len() > 0 && section != "" {
 			out.WriteString("\n")
