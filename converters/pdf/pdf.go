@@ -158,10 +158,22 @@ func (pureGoExtractor) Extract(ctx context.Context, data []byte) (string, error)
 				return "", fmt.Errorf("purego page %d: %w", pageNum, err)
 			}
 		}
-		if out.Len() > 0 && text != "" {
+		assets, err := extractPageAssets(page, pageNum)
+		if err != nil {
+			return "", fmt.Errorf("purego page %d: %w", pageNum, err)
+		}
+		section := strings.TrimSpace(text)
+		if len(assets) > 0 {
+			if section == "" {
+				section = strings.Join(assets, "\n")
+			} else {
+				section = section + "\n" + strings.Join(assets, "\n")
+			}
+		}
+		if out.Len() > 0 && section != "" {
 			out.WriteString("\n")
 		}
-		out.WriteString(text)
+		out.WriteString(section)
 	}
 
 	select {

@@ -888,6 +888,8 @@ func applyFilter(rd io.Reader, name string, param Value) io.Reader {
 		case nil:
 			return decoder
 		}
+	case "CCITTFaxDecode", "DCTDecode", "JPXDecode", "RunLengthDecode":
+		return rd
 	}
 }
 

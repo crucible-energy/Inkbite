@@ -2,8 +2,12 @@ package pdfconv
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -115,6 +119,57 @@ func TestPDFConversionHandlesArrayPageContents(t *testing.T) {
 	}
 }
 
+func TestPDFConversionExtractsFlateImageDataURI(t *testing.T) {
+	converter := New()
+	result, err := converter.Convert(
+		context.Background(),
+		bytes.NewReader(makeGrayImagePDF(2, 1, []byte{0x00, 0xFF})),
+		inkbite.StreamInfo{Extension: ".pdf"},
+		inkbite.ConvertOptions{PDFBackend: "purego"},
+	)
+	if err != nil {
+		t.Fatalf("Convert() error = %v", err)
+	}
+	if !strings.Contains(result.Markdown, "![PDF image page 1 Im1](data:image/png;base64,") {
+		t.Fatalf("expected PNG image data URI, got %q", result.Markdown)
+	}
+}
+
+func TestPDFConversionExtractsJPEGImageDataURI(t *testing.T) {
+	converter := New()
+	result, err := converter.Convert(
+		context.Background(),
+		bytes.NewReader(makeJPEGImagePDF()),
+		inkbite.StreamInfo{Extension: ".pdf"},
+		inkbite.ConvertOptions{PDFBackend: "purego"},
+	)
+	if err != nil {
+		t.Fatalf("Convert() error = %v", err)
+	}
+	if !strings.Contains(result.Markdown, "![PDF image page 1 Im1](data:image/jpeg;base64,") {
+		t.Fatalf("expected JPEG image data URI, got %q", result.Markdown)
+	}
+}
+
+func TestPDFConversionSkipsUnusedImageResources(t *testing.T) {
+	converter := New()
+	result, err := converter.Convert(
+		context.Background(),
+		bytes.NewReader(makeGrayImagePDFWithUnusedResource()),
+		inkbite.StreamInfo{Extension: ".pdf"},
+		inkbite.ConvertOptions{PDFBackend: "purego"},
+	)
+	if err != nil {
+		t.Fatalf("Convert() error = %v", err)
+	}
+	if !strings.Contains(result.Markdown, "![PDF image page 1 Im1](data:image/png;base64,") {
+		t.Fatalf("expected referenced PNG image data URI, got %q", result.Markdown)
+	}
+	if strings.Contains(result.Markdown, "![PDF image page 1 Im2](data:image/png;base64,") {
+		t.Fatalf("expected unused image resource to be skipped, got %q", result.Markdown)
+	}
+}
+
 func TestChooseExtractorRejectsExternalBackendName(t *testing.T) {
 	converter := New()
 
@@ -200,6 +255,93 @@ func makeArrayContentsPDF(first, second string) []byte {
 	}
 	fmt.Fprintf(&doc, "trailer\n<< /Root 1 0 R /Size %d >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xrefOffset)
 
+	return doc.Bytes()
+}
+
+func makeGrayImagePDF(width, height int, pixels []byte) []byte {
+	content := []byte("q\n2 0 0 1 0 0 cm\n/Im1 Do\nQ")
+
+	objects := [][]byte{
+		[]byte("<< /Type /Catalog /Pages 2 0 R >>"),
+		[]byte("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+		[]byte("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>"),
+		[]byte(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content)),
+		makeGrayImageXObject(width, height, pixels),
+	}
+	return makeBinaryPDF(objects)
+}
+
+func makeGrayImagePDFWithUnusedResource() []byte {
+	content := []byte("q\n2 0 0 1 0 0 cm\n/Im1 Do\nQ")
+
+	objects := [][]byte{
+		[]byte("<< /Type /Catalog /Pages 2 0 R >>"),
+		[]byte("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+		[]byte("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R /Im2 6 0 R >> >> >>"),
+		[]byte(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content)),
+		makeGrayImageXObject(1, 1, []byte{0x00}),
+		makeGrayImageXObject(1, 1, []byte{0xFF}),
+	}
+	return makeBinaryPDF(objects)
+}
+
+func makeGrayImageXObject(width, height int, pixels []byte) []byte {
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := writer.Write(pixels); err != nil {
+		panic(err)
+	}
+	if err := writer.Close(); err != nil {
+		panic(err)
+	}
+	imageStream := append([]byte(fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n", width, height, compressed.Len())), compressed.Bytes()...)
+	imageStream = append(imageStream, []byte("\nendstream")...)
+	return imageStream
+}
+
+func makeJPEGImagePDF() []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 2, 1))
+	img.Set(0, 0, color.RGBA{R: 0xFF, A: 0xFF})
+	img.Set(1, 0, color.RGBA{G: 0xFF, A: 0xFF})
+
+	var jpegBytes bytes.Buffer
+	if err := jpeg.Encode(&jpegBytes, img, nil); err != nil {
+		panic(err)
+	}
+
+	content := []byte("q\n2 0 0 1 0 0 cm\n/Im1 Do\nQ")
+	imageStream := append([]byte(fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length %d >>\nstream\n", jpegBytes.Len())), jpegBytes.Bytes()...)
+	imageStream = append(imageStream, []byte("\nendstream")...)
+
+	objects := [][]byte{
+		[]byte("<< /Type /Catalog /Pages 2 0 R >>"),
+		[]byte("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+		[]byte("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>"),
+		[]byte(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content)),
+		imageStream,
+	}
+	return makeBinaryPDF(objects)
+}
+
+func makeBinaryPDF(objects [][]byte) []byte {
+	var doc bytes.Buffer
+	doc.WriteString("%PDF-1.4\n")
+
+	offsets := make([]int, len(objects)+1)
+	for idx, object := range objects {
+		offsets[idx+1] = doc.Len()
+		fmt.Fprintf(&doc, "%d 0 obj\n", idx+1)
+		doc.Write(object)
+		doc.WriteString("\nendobj\n")
+	}
+
+	xrefOffset := doc.Len()
+	fmt.Fprintf(&doc, "xref\n0 %d\n", len(objects)+1)
+	doc.WriteString("0000000000 65535 f \n")
+	for idx := 1; idx <= len(objects); idx++ {
+		fmt.Fprintf(&doc, "%010d 00000 n \n", offsets[idx])
+	}
+	fmt.Fprintf(&doc, "trailer\n<< /Root 1 0 R /Size %d >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xrefOffset)
 	return doc.Bytes()
 }
 
