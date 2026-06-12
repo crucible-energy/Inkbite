@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"compress/zlib"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
+	"image/png"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -170,6 +172,42 @@ func TestPDFConversionSkipsUnusedImageResources(t *testing.T) {
 	}
 }
 
+func TestPDFConversionAppliesImageMaskAsAlpha(t *testing.T) {
+	converter := New()
+	result, err := converter.Convert(
+		context.Background(),
+		bytes.NewReader(makeMaskedJPEGImagePDF()),
+		inkbite.StreamInfo{Extension: ".pdf"},
+		inkbite.ConvertOptions{PDFBackend: "purego"},
+	)
+	if err != nil {
+		t.Fatalf("Convert() error = %v", err)
+	}
+	prefix := "![PDF image page 1 Im1](data:image/png;base64,"
+	start := strings.Index(result.Markdown, prefix)
+	if start < 0 {
+		t.Fatalf("expected masked image PNG data URI, got %q", result.Markdown)
+	}
+	start += len(prefix)
+	end := strings.Index(result.Markdown[start:], ")")
+	if end < 0 {
+		t.Fatalf("expected closing data URI marker, got %q", result.Markdown)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(result.Markdown[start : start+end])
+	if err != nil {
+		t.Fatalf("DecodeString() error = %v", err)
+	}
+	img, err := png.Decode(bytes.NewReader(decoded))
+	if err != nil {
+		t.Fatalf("png.Decode() error = %v", err)
+	}
+	left := color.NRGBAModel.Convert(img.At(0, 0)).(color.NRGBA)
+	right := color.NRGBAModel.Convert(img.At(1, 0)).(color.NRGBA)
+	if left.A != 0xFF || right.A != 0x00 {
+		t.Fatalf("expected alpha mask to keep first pixel opaque and second pixel transparent, got left=%#v right=%#v", left, right)
+	}
+}
+
 func TestChooseExtractorRejectsExternalBackendName(t *testing.T) {
 	converter := New()
 
@@ -281,6 +319,32 @@ func makeGrayImagePDFWithUnusedResource() []byte {
 		[]byte(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content)),
 		makeGrayImageXObject(1, 1, []byte{0x00}),
 		makeGrayImageXObject(1, 1, []byte{0xFF}),
+	}
+	return makeBinaryPDF(objects)
+}
+
+func makeMaskedJPEGImagePDF() []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 2, 1))
+	img.Set(0, 0, color.RGBA{R: 0xFF, A: 0xFF})
+	img.Set(1, 0, color.RGBA{G: 0xFF, A: 0xFF})
+
+	var jpegBytes bytes.Buffer
+	if err := jpeg.Encode(&jpegBytes, img, nil); err != nil {
+		panic(err)
+	}
+
+	content := []byte("q\n2 0 0 1 0 0 cm\n/Im1 Do\nQ")
+	imageStream := append([]byte(fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Mask 6 0 R /Length %d >>\nstream\n", jpegBytes.Len())), jpegBytes.Bytes()...)
+	imageStream = append(imageStream, []byte("\nendstream")...)
+	maskStream := []byte("<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ImageMask true /BitsPerComponent 1 /Length 1 >>\nstream\n@\nendstream")
+
+	objects := [][]byte{
+		[]byte("<< /Type /Catalog /Pages 2 0 R >>"),
+		[]byte("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+		[]byte("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R /Im2 6 0 R >> >> >>"),
+		[]byte(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content)),
+		imageStream,
+		maskStream,
 	}
 	return makeBinaryPDF(objects)
 }

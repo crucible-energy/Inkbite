@@ -115,6 +115,22 @@ func imageAssetData(xobject pdf.Value) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	mask := xobject.Key("Mask")
+	if !mask.IsNull() {
+		img, err := imageAssetImage(xobject, width, height, bitsPerComponent)
+		if err != nil {
+			return nil, "", err
+		}
+		alpha, err := imageMaskAlpha(mask, width, height)
+		if err != nil {
+			return nil, "", err
+		}
+		data, err := encodePNG(applyAlphaMask(img, alpha))
+		if err != nil {
+			return nil, "", err
+		}
+		return data, "image/png", nil
+	}
 
 	filter := terminalFilterName(xobject.Key("Filter"))
 	switch filter {
@@ -151,6 +167,34 @@ func imageAssetData(xobject pdf.Value) ([]byte, string, error) {
 		return data, "image/png", nil
 	default:
 		return nil, "", fmt.Errorf("unsupported PDF image filter %q", filter)
+	}
+}
+
+func imageAssetImage(xobject pdf.Value, width int, height int, bitsPerComponent int) (image.Image, error) {
+	filter := terminalFilterName(xobject.Key("Filter"))
+	switch filter {
+	case "DCTDecode":
+		data, err := readAllStreamBytes(xobject)
+		if err != nil {
+			return nil, err
+		}
+		img, _, err := image.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("invalid JPEG image stream: %w", err)
+		}
+		return img, nil
+	case "FlateDecode":
+		raw, err := readAllStreamBytes(xobject)
+		if err != nil {
+			return nil, err
+		}
+		return rasterSamplesImage(raw, xobject.Key("ColorSpace"), width, height, bitsPerComponent)
+	case "CCITTFaxDecode":
+		return ccittImage(maskOrImageReader{xobject}, width, height, xobject.Key("DecodeParms").Key("K").Int64() >= 0)
+	case "":
+		return rawMaskImage(xobject, width, height, bitsPerComponent)
+	default:
+		return nil, fmt.Errorf("unsupported PDF image filter %q", filter)
 	}
 }
 
@@ -195,37 +239,34 @@ func readAllStreamBytes(stream pdf.Value) ([]byte, error) {
 }
 
 func rawMaskToPNG(xobject pdf.Value, width int, height int, bitsPerComponent int) ([]byte, error) {
-	if bitsPerComponent != 1 {
-		return nil, fmt.Errorf("unsupported unfiltered PDF image bits-per-component %d", bitsPerComponent)
-	}
-	raw, err := readAllStreamBytes(xobject)
+	img, err := rawMaskImage(xobject, width, height, bitsPerComponent)
 	if err != nil {
 		return nil, err
 	}
-	return packBitmapToPNG(raw, width, height)
+	return encodePNG(img)
 }
 
 func ccittImageToPNG(xobject pdf.Value, width int, height int) ([]byte, error) {
-	stream := xobject.Reader()
-	defer stream.Close()
-
-	subformat := ccitt.Group4
-	if xobject.Key("DecodeParms").Key("K").Int64() >= 0 {
-		subformat = ccitt.Group3
-	}
-	reader := ccitt.NewReader(stream, ccitt.MSB, subformat, width, height, &ccitt.Options{})
-	raw, err := io.ReadAll(reader)
+	img, err := ccittImage(maskOrImageReader{xobject}, width, height, xobject.Key("DecodeParms").Key("K").Int64() >= 0)
 	if err != nil {
-		return nil, fmt.Errorf("invalid CCITT image stream: %w", err)
+		return nil, err
 	}
-	return packBitmapToPNG(raw, width, height)
+	return encodePNG(img)
 }
 
 func rasterSamplesToPNG(raw []byte, colorSpace pdf.Value, width int, height int, bitsPerComponent int) ([]byte, error) {
+	img, err := rasterSamplesImage(raw, colorSpace, width, height, bitsPerComponent)
+	if err != nil {
+		return nil, err
+	}
+	return encodePNG(img)
+}
+
+func rasterSamplesImage(raw []byte, colorSpace pdf.Value, width int, height int, bitsPerComponent int) (image.Image, error) {
 	if bitsPerComponent == 1 {
 		switch colorSpaceName(colorSpace) {
 		case "", "DeviceGray":
-			return packBitmapToPNG(raw, width, height)
+			return packBitmapImage(raw, width, height, false)
 		case "Indexed":
 			return nil, fmt.Errorf("unsupported 1-bit indexed PDF image")
 		default:
@@ -244,7 +285,7 @@ func rasterSamplesToPNG(raw []byte, colorSpace pdf.Value, width int, height int,
 		}
 		img := image.NewGray(image.Rect(0, 0, width, height))
 		copy(img.Pix, raw[:expected])
-		return encodePNG(img)
+		return img, nil
 	case "DeviceRGB":
 		if bitsPerComponent != 8 {
 			return nil, fmt.Errorf("unsupported RGB PDF image bits-per-component %d", bitsPerComponent)
@@ -262,7 +303,7 @@ func rasterSamplesToPNG(raw []byte, colorSpace pdf.Value, width int, height int,
 			dst[j+2] = src[i+2]
 			dst[j+3] = 0xFF
 		}
-		return encodePNG(img)
+		return img, nil
 	case "Indexed":
 		if bitsPerComponent != 8 {
 			return nil, fmt.Errorf("unsupported indexed PDF image bits-per-component %d", bitsPerComponent)
@@ -277,10 +318,45 @@ func rasterSamplesToPNG(raw []byte, colorSpace pdf.Value, width int, height int,
 		}
 		img := image.NewPaletted(image.Rect(0, 0, width, height), palette)
 		copy(img.Pix, raw[:expected])
-		return encodePNG(img)
+		return img, nil
 	default:
 		return nil, fmt.Errorf("unsupported PDF image colorspace %q", colorSpaceName(colorSpace))
 	}
+}
+
+type maskOrImageReader struct {
+	value pdf.Value
+}
+
+func (m maskOrImageReader) ReadAll() ([]byte, error) {
+	return readAllStreamBytes(m.value)
+}
+
+func rawMaskImage(xobject pdf.Value, width int, height int, bitsPerComponent int) (image.Image, error) {
+	if bitsPerComponent != 1 {
+		return nil, fmt.Errorf("unsupported unfiltered PDF image bits-per-component %d", bitsPerComponent)
+	}
+	raw, err := readAllStreamBytes(xobject)
+	if err != nil {
+		return nil, err
+	}
+	return packBitmapImage(raw, width, height, false)
+}
+
+func ccittImage(reader maskOrImageReader, width int, height int, group3 bool) (image.Image, error) {
+	stream := reader.value.Reader()
+	defer stream.Close()
+
+	subformat := ccitt.Group4
+	if group3 {
+		subformat = ccitt.Group3
+	}
+	ccittReader := ccitt.NewReader(stream, ccitt.MSB, subformat, width, height, &ccitt.Options{})
+	raw, err := io.ReadAll(ccittReader)
+	if err != nil {
+		return nil, fmt.Errorf("invalid CCITT image stream: %w", err)
+	}
+	return packBitmapImage(raw, width, height, false)
 }
 
 func colorSpaceName(colorSpace pdf.Value) string {
@@ -338,9 +414,20 @@ func lookupBytes(value pdf.Value) ([]byte, error) {
 }
 
 func packBitmapToPNG(raw []byte, width int, height int) ([]byte, error) {
+	img, err := packBitmapImage(raw, width, height, false)
+	if err != nil {
+		return nil, err
+	}
+	return encodePNG(img)
+}
+
+func packBitmapImage(raw []byte, width int, height int, invert bool) (*image.Gray, error) {
 	img := image.NewGray(image.Rect(0, 0, width, height))
 	rowBytes := (width + 7) / 8
 	for y := 0; y < height; y++ {
+		if y*rowBytes >= len(raw) {
+			break
+		}
 		row := raw[y*rowBytes:]
 		for x := 0; x < width; x++ {
 			byteIndex := x / 8
@@ -349,6 +436,9 @@ func packBitmapToPNG(raw []byte, width int, height int) ([]byte, error) {
 				break
 			}
 			bit := (row[byteIndex] >> bitIndex) & 1
+			if invert {
+				bit ^= 1
+			}
 			if bit == 1 {
 				img.SetGray(x, y, color.Gray{Y: 0xFF})
 			} else {
@@ -356,7 +446,83 @@ func packBitmapToPNG(raw []byte, width int, height int) ([]byte, error) {
 			}
 		}
 	}
-	return encodePNG(img)
+	return img, nil
+}
+
+func imageMaskAlpha(mask pdf.Value, width int, height int) (*image.Alpha, error) {
+	maskWidth, maskHeight, bitsPerComponent, err := imageGeometry(mask)
+	if err != nil {
+		return nil, err
+	}
+	if maskWidth != width || maskHeight != height {
+		return nil, fmt.Errorf("PDF image mask dimensions %dx%d do not match image dimensions %dx%d", maskWidth, maskHeight, width, height)
+	}
+	if bitsPerComponent != 1 {
+		return nil, fmt.Errorf("unsupported PDF image mask bits-per-component %d", bitsPerComponent)
+	}
+
+	var raw []byte
+	switch terminalFilterName(mask.Key("Filter")) {
+	case "CCITTFaxDecode":
+		stream := mask.Reader()
+		defer stream.Close()
+		subformat := ccitt.Group4
+		if mask.Key("DecodeParms").Key("K").Int64() >= 0 {
+			subformat = ccitt.Group3
+		}
+		reader := ccitt.NewReader(stream, ccitt.MSB, subformat, width, height, &ccitt.Options{})
+		raw, err = io.ReadAll(reader)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CCITT image mask stream: %w", err)
+		}
+	case "", "FlateDecode":
+		raw, err = readAllStreamBytes(mask)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported PDF image mask filter %q", terminalFilterName(mask.Key("Filter")))
+	}
+
+	invert := false
+	decode := mask.Key("Decode")
+	if decode.Kind() == pdf.Array && decode.Len() >= 2 {
+		invert = decode.Index(0).Float64() > decode.Index(1).Float64()
+	}
+	gray, err := packBitmapImage(raw, width, height, invert)
+	if err != nil {
+		return nil, err
+	}
+	alpha := image.NewAlpha(gray.Bounds())
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			// PDF image masks paint on 0 by default; convert that to opaque alpha.
+			if gray.GrayAt(x, y).Y == 0xFF {
+				alpha.SetAlpha(x, y, color.Alpha{A: 0x00})
+			} else {
+				alpha.SetAlpha(x, y, color.Alpha{A: 0xFF})
+			}
+		}
+	}
+	return alpha, nil
+}
+
+func applyAlphaMask(img image.Image, alpha *image.Alpha) image.Image {
+	bounds := img.Bounds()
+	out := image.NewNRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			a := alpha.AlphaAt(x, y).A
+			out.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(r >> 8),
+				G: uint8(g >> 8),
+				B: uint8(b >> 8),
+				A: a,
+			})
+		}
+	}
+	return out
 }
 
 func encodePNG(img image.Image) ([]byte, error) {
