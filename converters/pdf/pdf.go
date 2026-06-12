@@ -3,6 +3,7 @@ package pdfconv
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -135,14 +136,32 @@ func (pureGoExtractor) Extract(ctx context.Context, data []byte) (string, error)
 		return "", fmt.Errorf("purego: %w", err)
 	}
 
-	textReader, err := reader.GetPlainText()
-	if err != nil {
-		return "", fmt.Errorf("purego: %w", err)
-	}
-
 	var out bytes.Buffer
-	if _, err := out.ReadFrom(textReader); err != nil {
-		return "", fmt.Errorf("purego: %w", err)
+	fonts := make(map[string]*pdf.Font)
+	for pageNum := 1; pageNum <= reader.NumPage(); pageNum++ {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+		page := reader.Page(pageNum)
+		if page.V.IsNull() {
+			continue
+		}
+		text, err := page.GetPlainText(fonts)
+		if err != nil {
+			return "", fmt.Errorf("purego page %d: %w", pageNum, err)
+		}
+		if strings.TrimSpace(text) == "" {
+			text, err = extractPageContentText(page)
+			if err != nil {
+				return "", fmt.Errorf("purego page %d: %w", pageNum, err)
+			}
+		}
+		if out.Len() > 0 && text != "" {
+			out.WriteString("\n")
+		}
+		out.WriteString(text)
 	}
 
 	select {
@@ -152,6 +171,40 @@ func (pureGoExtractor) Extract(ctx context.Context, data []byte) (string, error)
 	}
 
 	return out.String(), nil
+}
+
+func extractPageContentText(page pdf.Page) (result string, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = ""
+			err = errors.New(fmt.Sprint(recovered))
+		}
+	}()
+
+	content := page.Content().Text
+	if len(content) == 0 {
+		return "", nil
+	}
+
+	var builder bytes.Buffer
+	lastY := 0.0
+	line := ""
+	for _, text := range content {
+		if lastY != text.Y {
+			if lastY > 0 {
+				builder.WriteString(line)
+				builder.WriteString("\n")
+				line = text.S
+			} else {
+				line += text.S
+			}
+		} else {
+			line += text.S
+		}
+		lastY = text.Y
+	}
+	builder.WriteString(line)
+	return builder.String(), nil
 }
 
 func layoutToMarkdown(input string) string {
@@ -169,28 +222,10 @@ func layoutToMarkdown(input string) string {
 			continue
 		}
 
-		cols := splitColumns(trimmed)
-		if len(cols) >= 2 {
-			j := i
-			var block [][]string
-			for j < len(lines) {
-				next := strings.TrimSpace(strings.TrimRight(lines[j], " \t"))
-				if next == "" {
-					break
-				}
-				row := splitColumns(next)
-				if len(row) != len(cols) {
-					break
-				}
-				block = append(block, row)
-				j++
-			}
-
-			if looksTabular(block) {
-				parts = append(parts, renderTable(block))
-				i = j
-				continue
-			}
+		if next, block, ok := detectTableBlock(lines, i); ok {
+			parts = append(parts, renderTable(block))
+			i = next
+			continue
 		}
 
 		var paragraph []string
@@ -199,7 +234,7 @@ func layoutToMarkdown(input string) string {
 			if current == "" {
 				break
 			}
-			if len(splitColumns(current)) >= 2 {
+			if _, _, ok := detectTableBlock(lines, i); ok {
 				break
 			}
 			paragraph = append(paragraph, current)
@@ -214,6 +249,33 @@ func layoutToMarkdown(input string) string {
 	}
 
 	return strings.Join(parts, "\n\n")
+}
+
+func detectTableBlock(lines []string, start int) (next int, block [][]string, ok bool) {
+	line := strings.TrimSpace(strings.TrimRight(lines[start], " \t"))
+	cols := splitColumns(line)
+	if len(cols) < 2 {
+		return 0, nil, false
+	}
+
+	j := start
+	for j < len(lines) {
+		nextLine := strings.TrimSpace(strings.TrimRight(lines[j], " \t"))
+		if nextLine == "" {
+			break
+		}
+		row := splitColumns(nextLine)
+		if len(row) != len(cols) {
+			break
+		}
+		block = append(block, row)
+		j++
+	}
+
+	if !looksTabular(block) {
+		return 0, nil, false
+	}
+	return j, block, true
 }
 
 func splitColumns(line string) []string {

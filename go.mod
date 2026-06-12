@@ -2,6 +2,8 @@ module github.com/LynnColeArt/Inkbite
 
 go 1.25.9
 
+replace github.com/dslipak/pdf => ./third_party/dslipakpdf
+
 require (
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.0
 	github.com/dslipak/pdf v0.0.2

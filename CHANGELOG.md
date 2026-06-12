@@ -34,6 +34,10 @@ The format is intentionally lightweight at the current stage of the project.
 
 - PDF extraction is fully self-contained and no longer depends on external
   executables
+- the pure-Go PDF path now handles array-valued page `/Contents` streams
+  correctly, falls back to positioned page content when plain-text extraction
+  returns an empty page, and preserves dense prose lines that contain repeated
+  spacing instead of dropping them as false table candidates
 - legacy XLS extraction now uses a self-contained reader path with improved
   formatted output for common date and numeric cells
 - README now documents the project in a formal, research-oriented tone
