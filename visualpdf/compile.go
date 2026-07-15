@@ -420,7 +420,7 @@ func compilePage(
 	if err != nil {
 		return PageManifest{}, nil, err
 	}
-	sourceAware := unavailableSourceAwareCandidate()
+	sourceAware := unavailableSourceAwareCandidate(sourceAwareEligibility(sourceDocument, page))
 	candidates := []Candidate{outlined, sourceAware}
 	verified := make([]Candidate, 0, 1)
 	for _, candidate := range candidates {
@@ -638,13 +638,16 @@ func emitOutlinedCandidate(ctx context.Context, pdftocairo, input, output string
 	return candidate, nil
 }
 
-func unavailableSourceAwareCandidate() Candidate {
+func unavailableSourceAwareCandidate(reason string) Candidate {
+	if strings.TrimSpace(reason) == "" {
+		reason = "No source font program, glyph mapping, and approved embedding policy were supplied; outlined glyph candidate remains required."
+	}
 	return Candidate{
 		Kind:             "source_aware_text",
 		State:            CandidateUnavailable,
 		ReferencedAssets: []Artifact{},
 		Verification:     []Verification{},
-		Reason:           "No source font program, glyph mapping, and approved embedding policy were supplied; outlined glyph candidate remains required.",
+		Reason:           reason,
 	}
 }
 

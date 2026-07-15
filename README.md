@@ -205,7 +205,8 @@ and attempts a Poppler/Cairo outlined-glyph SVG. A page becomes `verified_svg`
 only when the profile renderer passes its committed visual gate; otherwise a
 verified reference `raster_fallback` is emitted with a deterministic
 remediation item. The source-aware text candidate remains unavailable unless a
-source font program, glyph mapping, and approved embedding policy are present.
+source font program, ToUnicode glyph mapping, approved embedding policy, and
+pinned WOFF2 subsetter are present.
 No OCR is substituted for PDF-source text. Painted PDF raster XObjects,
 including images reached through Form XObjects, are also retained in
 integrity-hashed page sidecars: supported JPEG streams keep

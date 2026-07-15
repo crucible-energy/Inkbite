@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -311,6 +312,35 @@ func TestEmitSourceRasterAssetsWritesLosslessSidecars(t *testing.T) {
 	if right, _, _, _ := decoded.At(1, 0).RGBA(); right != 0xFFFF {
 		t.Fatalf("second pixel = %d, want 65535", right)
 	}
+}
+
+func TestTrueTypeEmbeddingPolicyFailureRejectsUnembeddableFonts(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		flags uint16
+		want  string
+	}{
+		{name: "allowed", flags: 0, want: ""},
+		{name: "restricted", flags: 0x0002, want: "forbids embedding"},
+		{name: "no subset", flags: 0x0100, want: "forbids subsetting"},
+		{name: "bitmap only", flags: 0x0200, want: "permits bitmap embedding only"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := trueTypeEmbeddingPolicyFailure(testTrueTypeProgram(test.flags)); got != test.want {
+				t.Fatalf("trueTypeEmbeddingPolicyFailure() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func testTrueTypeProgram(flags uint16) []byte {
+	data := make([]byte, 64)
+	binary.BigEndian.PutUint16(data[4:6], 1)
+	copy(data[12:16], "OS/2")
+	binary.BigEndian.PutUint32(data[20:24], 32)
+	binary.BigEndian.PutUint32(data[24:28], 10)
+	binary.BigEndian.PutUint16(data[40:42], flags)
+	return data
 }
 
 func fixtureCalibration(t *testing.T, root string) Calibration {
