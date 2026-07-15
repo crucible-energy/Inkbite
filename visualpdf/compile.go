@@ -30,8 +30,6 @@ import (
 var (
 	pagesPattern    = regexp.MustCompile(`(?m)^Pages:\s+(\d+)\s*$`)
 	pageSizePattern = regexp.MustCompile(`(?m)^Page size:\s+([0-9.]+) x ([0-9.]+) pts`)
-	svgResourceRef  = regexp.MustCompile(`(?i)(?:xlink:)?(?:href|src)\s*=\s*["']\s*([^"']*)["']`)
-	svgURLRef       = regexp.MustCompile(`(?i)url\(\s*["']?\s*([^"'\)\s]+)`)
 	svgImageDataURI = regexp.MustCompile(`(?is)(<image\b[^>]*?\b(?:(?:xlink:)?href|src)\s*=\s*["'])data:([^"']+)(["'])`)
 )
 
@@ -822,38 +820,147 @@ func validateSVGReferences(path string, localAssets map[string]struct{}) error {
 	if err != nil {
 		return err
 	}
-	lower := strings.ToLower(string(data))
-	if !strings.Contains(lower, "<svg") || strings.Contains(lower, "<script") || strings.Contains(lower, "<foreignobject") || strings.Contains(lower, "<iframe") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<!entity") {
-		return errors.New("SVG contains an unsupported structural construct")
-	}
-	if strings.Contains(lower, "srcset=") || strings.Contains(lower, "sizes=") {
-		return errors.New("SVG contains unsupported responsive-image metadata")
-	}
-	for _, match := range svgResourceRef.FindAllStringSubmatch(lower, -1) {
-		if !safeSVGResourceReference(match[1], localAssets) {
-			return errors.New("SVG contains an unsafe external resource reference")
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	depth := 0
+	rootSeen := false
+	rootEnded := false
+	styleDepth := 0
+	var style strings.Builder
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			if !rootSeen || !rootEnded {
+				return errors.New("SVG has no complete root element")
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("SVG is not well-formed XML: %w", err)
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			if rootEnded {
+				return errors.New("SVG contains multiple root elements")
+			}
+			name := strings.ToLower(value.Name.Local)
+			if depth == 0 {
+				if rootSeen || name != "svg" {
+					return errors.New("SVG has no svg root element")
+				}
+				rootSeen = true
+			}
+			depth++
+			if prohibitedSVGElement(name) {
+				return fmt.Errorf("SVG contains unsupported structural construct %q", name)
+			}
+			for _, attribute := range value.Attr {
+				attributeName := strings.ToLower(attribute.Name.Local)
+				if attributeName == "srcset" || attributeName == "sizes" {
+					return errors.New("SVG contains unsupported responsive-image metadata")
+				}
+				if strings.HasPrefix(attributeName, "on") {
+					return fmt.Errorf("SVG contains unsafe executable attribute %q", attribute.Name.Local)
+				}
+				if attributeName == "href" || attributeName == "src" {
+					if !safeSVGResourceReference(attribute.Value, localAssets, name) {
+						return errors.New("SVG contains an unsafe external resource reference")
+					}
+				}
+				if attributeName != "href" && attributeName != "src" {
+					if err := validateSVGStyle(attribute.Value, localAssets); err != nil {
+						return err
+					}
+				}
+			}
+			if name == "style" {
+				styleDepth = depth
+				style.Reset()
+			}
+		case xml.CharData:
+			if styleDepth != 0 {
+				style.Write([]byte(value))
+			}
+		case xml.EndElement:
+			name := strings.ToLower(value.Name.Local)
+			if styleDepth == depth && name == "style" {
+				if err := validateSVGStyle(style.String(), localAssets); err != nil {
+					return err
+				}
+				styleDepth = 0
+			}
+			depth--
+			if depth == 0 {
+				rootEnded = true
+			}
+		case xml.ProcInst:
+			if value.Target != "xml" || rootSeen {
+				return errors.New("SVG contains an unsupported processing instruction")
+			}
+		case xml.Directive:
+			return errors.New("SVG contains an unsupported XML directive")
 		}
 	}
-	for _, match := range svgURLRef.FindAllStringSubmatch(lower, -1) {
-		if !safeSVGResourceReference(match[1], localAssets) {
-			return errors.New("SVG contains an unsafe CSS resource reference")
-		}
-	}
-	for _, prohibited := range []string{"onload=", "onclick=", "onerror="} {
-		if strings.Contains(lower, prohibited) {
-			return fmt.Errorf("SVG contains unsafe external or executable reference %q", prohibited)
-		}
-	}
-	return nil
 }
 
-func safeSVGResourceReference(value string, localAssets map[string]struct{}) bool {
-	value = strings.TrimSpace(strings.ToLower(value))
-	if strings.HasPrefix(value, "#") || strings.HasPrefix(value, "data:") {
+func prohibitedSVGElement(name string) bool {
+	switch name {
+	case "script", "foreignobject", "iframe", "audio", "video", "object", "embed", "link", "base":
 		return true
+	default:
+		return false
+	}
+}
+
+func safeSVGResourceReference(value string, localAssets map[string]struct{}, element string) bool {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "#") || strings.HasPrefix(value, "data:") {
+		if strings.HasPrefix(value, "#") {
+			return true
+		}
+		if element != "image" {
+			return false
+		}
+		_, _, err := decodeSVGImageDataURI(value)
+		return err == nil
 	}
 	_, allowed := localAssets[value]
 	return allowed
+}
+
+func validateSVGStyle(style string, localAssets map[string]struct{}) error {
+	lower := strings.ToLower(style)
+	if strings.Contains(lower, "@import") || strings.Contains(style, "\\") {
+		return errors.New("SVG contains an unsafe CSS resource reference")
+	}
+	for offset := 0; offset < len(lower); {
+		index := strings.Index(lower[offset:], "url")
+		if index < 0 {
+			break
+		}
+		index += offset
+		cursor := index + len("url")
+		for cursor < len(style) && (style[cursor] == ' ' || style[cursor] == '\t' || style[cursor] == '\r' || style[cursor] == '\n') {
+			cursor++
+		}
+		if cursor >= len(style) || style[cursor] != '(' {
+			offset = cursor
+			continue
+		}
+		end := strings.IndexByte(style[cursor+1:], ')')
+		if end < 0 {
+			return errors.New("SVG contains a malformed CSS resource reference")
+		}
+		end += cursor + 1
+		value := strings.TrimSpace(style[cursor+1 : end])
+		if len(value) >= 2 && (value[0] == '\'' || value[0] == '"') && value[len(value)-1] == value[0] {
+			value = value[1 : len(value)-1]
+		}
+		if !safeSVGResourceReference(value, localAssets, "") {
+			return errors.New("SVG contains an unsafe CSS resource reference")
+		}
+		offset = end + 1
+	}
+	return nil
 }
 
 func externalizeSVGImageAssets(output, svgPath, assetDirectory string) ([]Artifact, error) {
@@ -916,6 +1023,7 @@ func externalizeSVGImageAssets(output, svgPath, assetDirectory string) ([]Artifa
 }
 
 func decodeSVGImageDataURI(value string) (string, []byte, error) {
+	value = strings.TrimPrefix(value, "data:")
 	metadata, encoded, found := strings.Cut(value, ",")
 	if !found {
 		return "", nil, errors.New("SVG image data URI is missing a payload")

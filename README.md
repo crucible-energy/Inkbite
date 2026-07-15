@@ -166,6 +166,9 @@ The repository does not yet have:
 make build
 ```
 
+The module selects Go 1.26.5; with the default `GOTOOLCHAIN=auto`, the Go
+command downloads that toolchain when necessary.
+
 ### Verify
 
 ```bash
@@ -204,9 +207,10 @@ and positioned `text-runs.json`, renders a deterministic PDF reference raster,
 and attempts a Poppler/Cairo outlined-glyph SVG. A page becomes `verified_svg`
 only when the profile renderer passes its committed visual gate; otherwise a
 verified reference `raster_fallback` is emitted with a deterministic
-remediation item. The source-aware text candidate remains unavailable unless a
-source font program, ToUnicode glyph mapping, approved embedding policy, and
-pinned WOFF2 subsetter are present.
+remediation item. The source-aware text candidate is currently recorded as
+unavailable: its eligibility diagnostics require a source font program,
+ToUnicode glyph mapping, approved embedding policy, and pinned WOFF2 subsetter,
+but an eligible positioned-text SVG emitter has not yet been implemented.
 No OCR is substituted for PDF-source text. Painted PDF raster XObjects,
 including images reached through Form XObjects, are also retained in
 integrity-hashed page sidecars: supported JPEG streams keep

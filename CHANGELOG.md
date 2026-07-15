@@ -29,6 +29,9 @@ The format is intentionally lightweight at the current stage of the project.
   and automated `govulncheck` scanning
 - packaged release archives for Linux, macOS, and Windows with generated
   checksum manifests
+- optional Visual-PDF compiler for fidelity-gated, offline PDF packages with
+  retained source PDFs, source-derived semantic artifacts, verified display
+  assets, integrity manifests, and deterministic remediation records
 
 ### Changed
 
@@ -46,5 +49,9 @@ The format is intentionally lightweight at the current stage of the project.
   formatted output for common date and numeric cells
 - README now documents the project in a formal, research-oriented tone
 - remote HTTP fetches now enforce a bounded response size limit by default
-- the module now targets Go `1.25.9` to pick up current patched standard
-  library fixes used by CI and release builds
+- the module selects Go `1.26.5` and updates `golang.org/x/net`,
+  `golang.org/x/image`, and `golang.org/x/crypto` to versions that fix the
+  reachable standard-library and dependency vulnerability findings
+- Visual-PDF SVG validation now parses the document and rejects every event
+  attribute, processing instruction, XML directive, stylesheet import, and
+  unlisted resource reference
