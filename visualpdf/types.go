@@ -10,9 +10,9 @@ import "time"
 
 const (
 	// ManifestSchemaVersion is the version of the emitted visual package manifest.
-	ManifestSchemaVersion = "inkbite.visualpdf.manifest.v1"
+	ManifestSchemaVersion = "inkbite.visualpdf.manifest.v2"
 	// ProfileSetSchemaVersion is the version of a visual profile set document.
-	ProfileSetSchemaVersion = "inkbite.visualpdf.profiles.v1"
+	ProfileSetSchemaVersion = "inkbite.visualpdf.profiles.v2"
 )
 
 // Toolchain identifies the build-time Poppler installation. Directory must be
@@ -39,8 +39,10 @@ type SVGRenderer struct {
 type Calibration struct {
 	CorpusID         string `json:"corpus_id"`
 	Report           string `json:"report"`
+	ReportSHA256     string `json:"report_sha256"`
 	MaxChannelDelta  uint8  `json:"max_channel_delta"`
 	MaxChangedPixels int    `json:"max_changed_pixels"`
+	reportPath       string
 }
 
 // VisualProfile defines one deterministic reference render and matching SVG
@@ -117,14 +119,15 @@ type Candidate struct {
 
 // Verification is a profile-specific visual gate result.
 type Verification struct {
-	ProfileID       string    `json:"profile_id"`
-	ProfileVersion  string    `json:"profile_version"`
-	Reference       Artifact  `json:"reference"`
-	Rendered        *Artifact `json:"rendered,omitempty"`
-	Passed          bool      `json:"passed"`
-	MaxChannelDelta uint8     `json:"max_channel_delta"`
-	ChangedPixels   int       `json:"changed_pixels"`
-	Reason          string    `json:"reason,omitempty"`
+	ProfileID       string      `json:"profile_id"`
+	ProfileVersion  string      `json:"profile_version"`
+	Reference       Artifact    `json:"reference"`
+	Rendered        *Artifact   `json:"rendered,omitempty"`
+	Passed          bool        `json:"passed"`
+	MaxChannelDelta uint8       `json:"max_channel_delta"`
+	ChangedPixels   int         `json:"changed_pixels"`
+	Calibration     Calibration `json:"calibration"`
+	Reason          string      `json:"reason,omitempty"`
 }
 
 // PageState is the only display state an emitted page can have.

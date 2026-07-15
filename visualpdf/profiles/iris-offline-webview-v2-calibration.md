@@ -1,4 +1,4 @@
-# Iris Offline WebView Visual Calibration v1
+# Iris Offline WebView Visual Calibration v2
 
 This profile definition is intentionally not a commercial-parity claim. The
 qualified Apple and Android offline WebView renderer commands, device matrix,

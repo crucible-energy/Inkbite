@@ -214,7 +214,7 @@ inkbite visual pdf \
   --output /new/visual-package \
   --poppler-dir /pinned/poppler/bin \
   --poppler-version 26.07.0 \
-  --profiles ./visualpdf/profiles/iris-offline-webview-v1.json
+  --profiles ./visualpdf/profiles/iris-offline-webview-v2.json
 ```
 
 The checked-in profile is intentionally unqualified: its renderer path is a

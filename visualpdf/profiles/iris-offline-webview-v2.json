@@ -1,9 +1,9 @@
 {
-  "schema_version": "inkbite.visualpdf.profiles.v1",
+  "schema_version": "inkbite.visualpdf.profiles.v2",
   "profiles": [
     {
       "id": "iris-offline-webview",
-      "version": "1",
+      "version": "2",
       "reference_dpi": 144,
       "svg_renderer": {
         "path": "/qualified/offline-webview-renderer",
@@ -12,7 +12,8 @@
       },
       "calibration": {
         "corpus_id": "iris-visual-calibration-v1",
-        "report": "profiles/iris-offline-webview-v1-calibration.md",
+        "report": "iris-offline-webview-v2-calibration.md",
+        "report_sha256": "605175295e0ce162e5c03ba5f3b49474a7d16f8c31ed92d9b2e17b829e9bc676",
         "max_channel_delta": 0,
         "max_changed_pixels": 0
       }

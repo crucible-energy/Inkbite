@@ -34,7 +34,11 @@ var (
 // LoadProfileSet loads an explicitly versioned profile file. JSON is used so
 // every tolerance and renderer command remains exact and reviewable.
 func LoadProfileSet(path string) (ProfileSet, error) {
-	data, err := os.ReadFile(path)
+	profilePath, err := filepath.Abs(path)
+	if err != nil {
+		return ProfileSet{}, fmt.Errorf("resolve visual profile set: %w", err)
+	}
+	data, err := os.ReadFile(profilePath)
 	if err != nil {
 		return ProfileSet{}, fmt.Errorf("read visual profile set: %w", err)
 	}
@@ -46,6 +50,9 @@ func LoadProfileSet(path string) (ProfileSet, error) {
 		return ProfileSet{}, fmt.Errorf("unsupported visual profile schema %q", profiles.SchemaVersion)
 	}
 	if err := validateProfiles(profiles.Profiles); err != nil {
+		return ProfileSet{}, err
+	}
+	if err := verifyCalibrationEvidence(profiles.Profiles, filepath.Dir(profilePath)); err != nil {
 		return ProfileSet{}, err
 	}
 	return profiles, nil
@@ -165,7 +172,10 @@ func validateOptions(options CompileOptions) error {
 	if strings.TrimSpace(options.Toolchain.Directory) == "" || strings.TrimSpace(options.Toolchain.Version) == "" {
 		return errors.New("pinned Poppler directory and version are required")
 	}
-	return validateProfiles(options.Profiles)
+	if err := validateProfiles(options.Profiles); err != nil {
+		return err
+	}
+	return verifyCalibrationEvidence(options.Profiles, "")
 }
 
 func validateProfiles(profiles []VisualProfile) error {
@@ -194,11 +204,71 @@ func validateProfiles(profiles []VisualProfile) error {
 		if strings.TrimSpace(profile.Calibration.CorpusID) == "" || strings.TrimSpace(profile.Calibration.Report) == "" {
 			return fmt.Errorf("visual profile %q needs committed calibration corpus and report identifiers", id)
 		}
+		if !isSHA256Digest(profile.Calibration.ReportSHA256) {
+			return fmt.Errorf("visual profile %q needs a lowercase SHA-256 calibration report hash", id)
+		}
 		if profile.Calibration.MaxChangedPixels < 0 {
 			return fmt.Errorf("visual profile %q max_changed_pixels cannot be negative", id)
 		}
 	}
 	return nil
+}
+
+func verifyCalibrationEvidence(profiles []VisualProfile, baseDirectory string) error {
+	for index := range profiles {
+		calibration := &profiles[index].Calibration
+		reportPath, err := resolveCalibrationReport(calibration, baseDirectory)
+		if err != nil {
+			return fmt.Errorf("visual profile %q calibration evidence: %w", profiles[index].ID, err)
+		}
+		hash, err := sha256File(reportPath)
+		if err != nil {
+			return fmt.Errorf("visual profile %q read calibration report: %w", profiles[index].ID, err)
+		}
+		if hash != calibration.ReportSHA256 {
+			return fmt.Errorf("visual profile %q calibration report hash does not match %s", profiles[index].ID, calibration.Report)
+		}
+	}
+	return nil
+}
+
+func resolveCalibrationReport(calibration *Calibration, baseDirectory string) (string, error) {
+	if calibration.reportPath != "" {
+		return calibration.reportPath, nil
+	}
+	if baseDirectory == "" {
+		if !filepath.IsAbs(calibration.Report) {
+			return "", errors.New("report must be absolute when profiles are not loaded from a profile set")
+		}
+		calibration.reportPath = filepath.Clean(calibration.Report)
+		return calibration.reportPath, nil
+	}
+	if filepath.IsAbs(calibration.Report) {
+		return "", errors.New("report must be relative to the profile set")
+	}
+	baseDirectory, err := filepath.EvalSymlinks(filepath.Clean(baseDirectory))
+	if err != nil {
+		return "", fmt.Errorf("resolve profile set directory: %w", err)
+	}
+	path := filepath.Clean(filepath.Join(baseDirectory, filepath.FromSlash(calibration.Report)))
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve report: %w", err)
+	}
+	relative, err := filepath.Rel(baseDirectory, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("report escapes the profile set directory")
+	}
+	calibration.reportPath = path
+	return path, nil
+}
+
+func isSHA256Digest(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func countToken(values []string, target string) int {
@@ -425,7 +495,7 @@ func emitReferences(ctx context.Context, pdftocairo, input, output string, page 
 		if err != nil {
 			return nil, err
 		}
-		references = append(references, Verification{ProfileID: profile.ID, ProfileVersion: profile.Version, Reference: artifact})
+		references = append(references, Verification{ProfileID: profile.ID, ProfileVersion: profile.Version, Reference: artifact, Calibration: profile.Calibration})
 	}
 	return references, nil
 }

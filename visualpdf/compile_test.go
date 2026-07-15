@@ -2,6 +2,7 @@ package visualpdf
 
 import (
 	"context"
+	"encoding/json"
 	"image"
 	"image/color"
 	"image/png"
@@ -51,7 +52,7 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 		Profiles: []VisualProfile{{
 			ID: "fixture-webview", Version: "1", ReferenceDPI: 72,
 			Renderer:    SVGRenderer{Path: renderer, Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}},
-			Calibration: Calibration{CorpusID: "fixture-corpus", Report: "fixture-report", MaxChannelDelta: 0, MaxChangedPixels: 0},
+			Calibration: fixtureCalibration(t, root),
 		}},
 		CompilerVersion: "test",
 		Now:             func() time.Time { return time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC) },
@@ -70,6 +71,9 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	}
 	if manifest.Pages[0].Candidates[1].State != CandidateUnavailable {
 		t.Fatalf("expected font-policy source-aware candidate to remain unavailable, got %#v", manifest.Pages[0].Candidates[1])
+	}
+	if got := manifest.Pages[0].Candidates[0].Verification[0].Calibration.ReportSHA256; got == "" {
+		t.Fatalf("expected verification to retain its calibration evidence, got %#v", manifest.Pages[0].Candidates[0].Verification[0])
 	}
 	semantic, err := os.ReadFile(filepath.Join(output, "pages", "0001", "semantic.md"))
 	if err != nil || string(semantic) != "Source text\n" {
@@ -102,7 +106,7 @@ func TestCompileUsesVerifiedReferenceAsRasterFallback(t *testing.T) {
 	}
 	manifest, err := Compile(context.Background(), CompileOptions{
 		InputPath: input, OutputDirectory: filepath.Join(root, "package"), Toolchain: Toolchain{Directory: tools, Version: "1.2.3"},
-		Profiles: []VisualProfile{{ID: "fixture", Version: "1", ReferenceDPI: 72, Renderer: SVGRenderer{Path: renderer, Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}}, Calibration: Calibration{CorpusID: "fixture", Report: "report", MaxChannelDelta: 0, MaxChangedPixels: 0}}},
+		Profiles: []VisualProfile{{ID: "fixture", Version: "1", ReferenceDPI: 72, Renderer: SVGRenderer{Path: renderer, Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}}, Calibration: fixtureCalibration(t, root)}},
 	})
 	if err != nil {
 		t.Fatalf("Compile() error = %v", err)
@@ -134,6 +138,86 @@ func TestValidateSVGRejectsUnlistedCSSResource(t *testing.T) {
 	if err := validateSVG(svg); err == nil || !strings.Contains(err.Error(), "CSS") {
 		t.Fatalf("expected CSS resource rejection, got %v", err)
 	}
+}
+
+func TestLoadProfileSetPinsCalibrationEvidence(t *testing.T) {
+	root := t.TempDir()
+	calibrationPath := filepath.Join(root, "calibration.md")
+	if err := os.WriteFile(calibrationPath, []byte("reviewed calibration evidence\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := sha256File(calibrationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileSet := ProfileSet{
+		SchemaVersion: ProfileSetSchemaVersion,
+		Profiles: []VisualProfile{{
+			ID: "fixture", Version: "1", ReferenceDPI: 72,
+			Renderer:    SVGRenderer{Path: "/qualified/renderer", Version: "fixture", Arguments: []string{"{input}", "{output}"}},
+			Calibration: Calibration{CorpusID: "fixture", Report: "calibration.md", ReportSHA256: hash},
+		}},
+	}
+	data, err := json.Marshal(profileSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profilePath := filepath.Join(root, "profiles.json")
+	if err := os.WriteFile(profilePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadProfileSet(profilePath)
+	if err != nil {
+		t.Fatalf("LoadProfileSet() error = %v", err)
+	}
+	resolvedCalibrationPath, err := filepath.EvalSymlinks(calibrationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Profiles[0].Calibration.reportPath != resolvedCalibrationPath {
+		t.Fatalf("calibration report path = %q, want %q", loaded.Profiles[0].Calibration.reportPath, resolvedCalibrationPath)
+	}
+	if err := os.WriteFile(calibrationPath, []byte("tampered evidence\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProfileSet(profilePath); err == nil || !strings.Contains(err.Error(), "calibration report hash") {
+		t.Fatalf("expected tampered calibration rejection, got %v", err)
+	}
+	outsidePath := filepath.Join(filepath.Dir(root), "outside.md")
+	if err := os.WriteFile(outsidePath, []byte("outside profile set\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(outsidePath) })
+	profileSet.Profiles[0].Calibration.Report = "../outside.md"
+	data, err = json.Marshal(profileSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profilePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProfileSet(profilePath); err == nil || !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("expected escaped calibration report rejection, got %v", err)
+	}
+}
+
+func TestCheckedInProfilePinsItsCalibrationReport(t *testing.T) {
+	if _, err := LoadProfileSet(filepath.Join("profiles", "iris-offline-webview-v2.json")); err != nil {
+		t.Fatalf("checked-in profile must load: %v", err)
+	}
+}
+
+func fixtureCalibration(t *testing.T, root string) Calibration {
+	t.Helper()
+	path := filepath.Join(root, "calibration.md")
+	if err := os.WriteFile(path, []byte("fixture calibration evidence\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := sha256File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Calibration{CorpusID: "fixture-corpus", Report: path, ReportSHA256: hash}
 }
 
 func writeFixturePNG(t *testing.T, path string) {
