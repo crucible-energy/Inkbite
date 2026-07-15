@@ -1,0 +1,21 @@
+{
+  "schema_version": "inkbite.visualpdf.profiles.v1",
+  "profiles": [
+    {
+      "id": "iris-offline-webview",
+      "version": "1",
+      "reference_dpi": 144,
+      "svg_renderer": {
+        "path": "/qualified/offline-webview-renderer",
+        "version": "replace-with-qualified-renderer-version",
+        "arguments": ["--input", "{input}", "--output", "{output}"]
+      },
+      "calibration": {
+        "corpus_id": "iris-visual-calibration-v1",
+        "report": "profiles/iris-offline-webview-v1-calibration.md",
+        "max_channel_delta": 0,
+        "max_changed_pixels": 0
+      }
+    }
+  ]
+}
