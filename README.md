@@ -191,6 +191,51 @@ available for CPU-oriented setup through a managed Python `venv`, with streamed
 install progress, pinned Python compatibility fixes, and a quieter self-test
 path. OCR-backed document conversion wiring remains follow-on work.
 
+## Optional Visual-PDF Compiler
+
+`visualpdf` is a build-time package API for applications that need a
+fidelity-gated offline visual representation of a local PDF. It is not part of
+the normal self-contained Markdown converter and never changes its behavior.
+The compiler requires a pinned local Poppler toolchain and a versioned visual
+profile that names the qualified offline renderer and calibration evidence.
+
+For every PDF page it retains the source, emits source-derived `semantic.md`
+and positioned `text-runs.json`, renders a deterministic PDF reference raster,
+and attempts a Poppler/Cairo outlined-glyph SVG. A page becomes `verified_svg`
+only when the profile renderer passes its committed visual gate; otherwise a
+verified reference `raster_fallback` is emitted with a deterministic
+remediation item. The source-aware text candidate remains unavailable unless a
+source font program, ToUnicode glyph mapping, approved embedding policy, and
+pinned WOFF2 subsetter are present.
+No OCR is substituted for PDF-source text. Painted PDF raster XObjects,
+including images reached through Form XObjects, are also retained in
+integrity-hashed page sidecars: supported JPEG streams keep
+their original bytes, while supported Flate, CCITT, and raw streams become
+lossless PNGs. Transparency masks remain separate sidecars; they are not
+flattened into the image. Each image and mask sidecar records every PDF-space
+`[a b c d e f]` placement of its painted image XObject. Separately, PNG and JPEG image data embedded by the
+outlined SVG are written byte-for-byte as declared package-local candidate
+assets while preserving the SVG image placement. The rewritten candidate must
+pass the same visual gate before it can become the display asset.
+
+```bash
+inkbite visual pdf \
+  --input /local/procedure.pdf \
+  --output /new/visual-package \
+  --poppler-dir /pinned/poppler/bin \
+  --poppler-version 26.07.0 \
+  --woff2-subsetter /pinned/woff2-subsetter \
+  --woff2-subsetter-version 1.0.0 \
+  --profiles ./visualpdf/profiles/iris-offline-webview-v2.json
+```
+
+The checked-in profile is intentionally unqualified: its renderer path is a
+placeholder and therefore fails closed until an application supplies a
+qualified offline-WebView renderer, device/corpus evidence, and reviewed
+calibration report. The compiler writes `manifest.json` with source and asset
+hashes, dimensions, candidates, verification evidence, semantic artifacts,
+and remediation queue.
+
 ### Example CLI Usage
 
 Convert a local file:

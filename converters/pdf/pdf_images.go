@@ -1,0 +1,862 @@
+package pdfconv
+
+import (
+	"bytes"
+	"encoding/base64"
+	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
+	"io"
+	"math"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/dslipak/pdf"
+	"golang.org/x/image/ccitt"
+)
+
+var doOperatorPattern = regexp.MustCompile(`/([^\s<>\[\]\(\)%/]+)\s+Do\b`)
+
+// RasterAsset is a PDF page image or transparency mask preserved for visual
+// packaging. Original JPEG bytes are retained exactly; other supported PDF
+// raster encodings become lossless PNG only after their decoded pixels are
+// verified locally.
+type RasterAsset struct {
+	Name       string
+	Role       string
+	MaskFor    string
+	Placements []RasterPlacement
+	MediaType  string
+	Encoding   string
+	Bytes      []byte
+}
+
+// RasterPlacement is the PDF user-space transform in effect when an image
+// XObject is painted. Matrix uses the PDF/SVG [a b c d e f] ordering.
+type RasterPlacement struct {
+	Matrix [6]float64
+}
+
+// ExtractPageRasterAssets returns only image XObjects painted by one PDF page.
+// It never flattens a mask into its image: /Mask and /SMask streams are emitted
+// as separate assets. Unsupported image encodings or mask forms fail closed.
+func ExtractPageRasterAssets(document []byte, pageNumber int) ([]RasterAsset, error) {
+	if pageNumber <= 0 {
+		return nil, fmt.Errorf("PDF page number must be positive")
+	}
+	reader, err := pdf.NewReader(bytes.NewReader(document), int64(len(document)))
+	if err != nil {
+		return nil, err
+	}
+	if pageNumber > reader.NumPage() {
+		return nil, fmt.Errorf("PDF page %d is unavailable", pageNumber)
+	}
+	page := reader.Page(pageNumber)
+	if page.V.IsNull() {
+		return nil, fmt.Errorf("PDF page %d is null", pageNumber)
+	}
+	return pageRasterAssets(page)
+}
+
+func pageRasterAssets(page pdf.Page) ([]RasterAsset, error) {
+	painted, err := paintedImageXObjects(page)
+	if err != nil {
+		return nil, err
+	}
+	if len(painted) == 0 {
+		return []RasterAsset{}, nil
+	}
+	assets := make([]RasterAsset, 0, len(painted))
+	for _, image := range painted {
+		data, mediaType, encoding, err := sourceRasterAssetData(image.xobject)
+		if err != nil {
+			return nil, fmt.Errorf("image XObject %s: %w", image.name, err)
+		}
+		assets = append(assets, RasterAsset{
+			Name: image.name, Role: "image", Placements: image.placements, MediaType: mediaType, Encoding: encoding, Bytes: data,
+		})
+		for _, key := range []string{"Mask", "SMask"} {
+			mask := image.xobject.Key(key)
+			if mask.IsNull() {
+				continue
+			}
+			if mask.Kind() != pdf.Stream {
+				return nil, fmt.Errorf("image XObject %s has unsupported %s form", image.name, key)
+			}
+			maskData, maskMediaType, maskEncoding, maskErr := sourceRasterAssetData(mask)
+			if maskErr != nil {
+				return nil, fmt.Errorf("image XObject %s %s: %w", image.name, key, maskErr)
+			}
+			assets = append(assets, RasterAsset{
+				Name:       image.name + "-" + strings.ToLower(key),
+				Role:       "mask",
+				MaskFor:    image.name,
+				Placements: image.placements,
+				MediaType:  maskMediaType,
+				Encoding:   maskEncoding,
+				Bytes:      maskData,
+			})
+		}
+	}
+	return assets, nil
+}
+
+const maxFormXObjectDepth = 32
+
+type paintedImageXObject struct {
+	name       string
+	xobject    pdf.Value
+	placements []RasterPlacement
+}
+
+type rasterPlacementExtractor struct {
+	images map[string]*paintedImageXObject
+}
+
+func paintedImageXObjects(page pdf.Page) ([]paintedImageXObject, error) {
+	extractor := rasterPlacementExtractor{images: make(map[string]*paintedImageXObject)}
+	if err := extractor.extract(page.Resources(), page.V.Key("Contents"), nil, identityRasterPlacement(), 0); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(extractor.images))
+	for name := range extractor.images {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]paintedImageXObject, 0, len(names))
+	for _, name := range names {
+		result = append(result, *extractor.images[name])
+	}
+	return result, nil
+}
+
+func (extractor *rasterPlacementExtractor) extract(resources, contents pdf.Value, path []string, initial RasterPlacement, depth int) (err error) {
+	if depth > maxFormXObjectDepth {
+		return fmt.Errorf("Form XObject nesting exceeds %d", maxFormXObjectDepth)
+	}
+	if resources.Kind() != pdf.Dict {
+		return fmt.Errorf("XObject resources are missing or malformed")
+	}
+	current := initial
+	var stack []RasterPlacement
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("interpret page graphics state: %v", recovered)
+		}
+	}()
+	if err = interpretContentStreams(contents, func(stream pdf.Value) {
+		pdf.Interpret(stream, func(values *pdf.Stack, operator string) {
+			if err != nil {
+				return
+			}
+			arguments := popPDFArguments(values)
+			switch operator {
+			case "q":
+				if len(arguments) != 0 {
+					err = fmt.Errorf("q has %d arguments", len(arguments))
+					return
+				}
+				stack = append(stack, current)
+			case "Q":
+				if len(arguments) != 0 {
+					err = fmt.Errorf("Q has %d arguments", len(arguments))
+					return
+				}
+				if len(stack) == 0 {
+					err = fmt.Errorf("unbalanced Q graphics-state restore")
+					return
+				}
+				current = stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+			case "cm":
+				matrix, matrixErr := rasterPlacementMatrix(arguments)
+				if matrixErr != nil {
+					err = matrixErr
+					return
+				}
+				current = composeRasterPlacements(matrix, current)
+			case "Do":
+				if len(arguments) != 1 || arguments[0].Kind() != pdf.Name || arguments[0].Name() == "" {
+					err = fmt.Errorf("Do has invalid XObject name")
+					return
+				}
+				name := arguments[0].Name()
+				xobject := resources.Key("XObject").Key(name)
+				if xobject.IsNull() {
+					err = fmt.Errorf("painted XObject %s is missing from resources", name)
+					return
+				}
+				qualifiedName := strings.Join(append(append([]string{}, path...), name), "/")
+				switch xobject.Key("Subtype").Name() {
+				case "Image":
+					if image, ok := extractor.images[qualifiedName]; ok {
+						image.placements = append(image.placements, current)
+					} else {
+						extractor.images[qualifiedName] = &paintedImageXObject{
+							name: qualifiedName, xobject: xobject, placements: []RasterPlacement{current},
+						}
+					}
+				case "Form":
+					matrix, matrixErr := formXObjectMatrix(xobject)
+					if matrixErr != nil {
+						err = fmt.Errorf("Form XObject %s: %w", qualifiedName, matrixErr)
+						return
+					}
+					if formErr := extractor.extract(xobject.Key("Resources"), xobject, append(path, name), composeRasterPlacements(matrix, current), depth+1); formErr != nil {
+						err = formErr
+					}
+				default:
+					err = fmt.Errorf("painted XObject %s has unsupported subtype %q", qualifiedName, xobject.Key("Subtype").Name())
+				}
+			}
+		})
+	}); err != nil {
+		return err
+	}
+	if len(stack) != 0 {
+		return fmt.Errorf("unbalanced q graphics-state save")
+	}
+	return nil
+}
+
+func formXObjectMatrix(xobject pdf.Value) (RasterPlacement, error) {
+	matrix := xobject.Key("Matrix")
+	if matrix.IsNull() {
+		return identityRasterPlacement(), nil
+	}
+	if matrix.Kind() != pdf.Array {
+		return RasterPlacement{}, fmt.Errorf("Matrix is not an array")
+	}
+	arguments := make([]pdf.Value, matrix.Len())
+	for index := range arguments {
+		arguments[index] = matrix.Index(index)
+	}
+	return rasterPlacementMatrix(arguments)
+}
+
+func interpretContentStreams(contents pdf.Value, interpret func(pdf.Value)) error {
+	switch contents.Kind() {
+	case pdf.Null:
+		return nil
+	case pdf.Stream:
+		interpret(contents)
+		return nil
+	case pdf.Array:
+		for index := 0; index < contents.Len(); index++ {
+			if err := interpretContentStreams(contents.Index(index), interpret); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported page contents kind %v", contents.Kind())
+	}
+}
+
+func popPDFArguments(values *pdf.Stack) []pdf.Value {
+	arguments := make([]pdf.Value, values.Len())
+	for index := len(arguments) - 1; index >= 0; index-- {
+		arguments[index] = values.Pop()
+	}
+	return arguments
+}
+
+func identityRasterPlacement() RasterPlacement {
+	return RasterPlacement{Matrix: [6]float64{1, 0, 0, 1, 0, 0}}
+}
+
+func rasterPlacementMatrix(arguments []pdf.Value) (RasterPlacement, error) {
+	if len(arguments) != 6 {
+		return RasterPlacement{}, fmt.Errorf("cm has %d arguments", len(arguments))
+	}
+	var matrix RasterPlacement
+	for index, argument := range arguments {
+		if argument.Kind() != pdf.Integer && argument.Kind() != pdf.Real {
+			return RasterPlacement{}, fmt.Errorf("cm argument %d is not numeric", index)
+		}
+		component := argument.Float64()
+		if math.IsNaN(component) || math.IsInf(component, 0) {
+			return RasterPlacement{}, fmt.Errorf("cm argument %d is not finite", index)
+		}
+		matrix.Matrix[index] = component
+	}
+	return matrix, nil
+}
+
+// composeRasterPlacements matches the PDF graphics-state rule used by the
+// parser: a cm matrix is prepended to the current transformation matrix.
+func composeRasterPlacements(next, current RasterPlacement) RasterPlacement {
+	a, b, c, d, e, f := next.Matrix[0], next.Matrix[1], next.Matrix[2], next.Matrix[3], next.Matrix[4], next.Matrix[5]
+	g, h, i, j, k, l := current.Matrix[0], current.Matrix[1], current.Matrix[2], current.Matrix[3], current.Matrix[4], current.Matrix[5]
+	return RasterPlacement{Matrix: [6]float64{
+		a*g + b*i,
+		a*h + b*j,
+		c*g + d*i,
+		c*h + d*j,
+		e*g + f*i + k,
+		e*h + f*j + l,
+	}}
+}
+
+func sourceRasterAssetData(xobject pdf.Value) ([]byte, string, string, error) {
+	width, height, bitsPerComponent, err := imageGeometry(xobject)
+	if err != nil {
+		return nil, "", "", err
+	}
+	filter := terminalFilterName(xobject.Key("Filter"))
+	switch filter {
+	case "DCTDecode":
+		data, err := readAllStreamBytes(xobject)
+		if err != nil {
+			return nil, "", "", err
+		}
+		if _, err := jpeg.DecodeConfig(bytes.NewReader(data)); err != nil {
+			return nil, "", "", fmt.Errorf("invalid JPEG image stream: %w", err)
+		}
+		return data, "image/jpeg", "original_jpeg", nil
+	case "FlateDecode":
+		raw, err := readAllStreamBytes(xobject)
+		if err != nil {
+			return nil, "", "", err
+		}
+		data, err := rasterSamplesToPNG(raw, xobject.Key("ColorSpace"), width, height, bitsPerComponent)
+		if err != nil {
+			return nil, "", "", err
+		}
+		return data, "image/png", "lossless_png", nil
+	case "CCITTFaxDecode":
+		data, err := ccittImageToPNG(xobject, width, height)
+		if err != nil {
+			return nil, "", "", err
+		}
+		return data, "image/png", "lossless_png", nil
+	case "":
+		data, err := rawMaskToPNG(xobject, width, height, bitsPerComponent)
+		if err != nil {
+			return nil, "", "", err
+		}
+		return data, "image/png", "lossless_png", nil
+	default:
+		return nil, "", "", fmt.Errorf("unsupported PDF image filter %q", filter)
+	}
+}
+
+func extractPageAssets(page pdf.Page, pageNum int) ([]string, error) {
+	referenced, err := referencedXObjectNames(page)
+	if err != nil {
+		return nil, err
+	}
+	if len(referenced) == 0 {
+		return nil, nil
+	}
+
+	xobjects := page.Resources().Key("XObject")
+	names := xobjects.Keys()
+	if len(names) == 0 {
+		return nil, nil
+	}
+
+	lines := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, ok := referenced[name]; !ok {
+			continue
+		}
+		xobject := xobjects.Key(name)
+		if xobject.IsNull() || xobject.Key("Subtype").Name() != "Image" {
+			continue
+		}
+		line, err := markdownImageForXObject(xobject, pageNum, name)
+		if err != nil {
+			return nil, err
+		}
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines, nil
+}
+
+func referencedXObjectNames(page pdf.Page) (map[string]struct{}, error) {
+	content, err := contentStreamBytes(page.V.Key("Contents"))
+	if err != nil {
+		return nil, err
+	}
+	if len(content) == 0 {
+		return nil, nil
+	}
+	matches := doOperatorPattern.FindAllSubmatch(content, -1)
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	names := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		names[string(match[1])] = struct{}{}
+	}
+	return names, nil
+}
+
+func contentStreamBytes(contents pdf.Value) ([]byte, error) {
+	switch contents.Kind() {
+	case pdf.Null:
+		return nil, nil
+	case pdf.Stream:
+		return readAllStreamBytes(contents)
+	case pdf.Array:
+		var combined bytes.Buffer
+		for i := 0; i < contents.Len(); i++ {
+			chunk, err := contentStreamBytes(contents.Index(i))
+			if err != nil {
+				return nil, err
+			}
+			if len(chunk) == 0 {
+				continue
+			}
+			if combined.Len() > 0 {
+				combined.WriteByte('\n')
+			}
+			combined.Write(chunk)
+		}
+		return combined.Bytes(), nil
+	default:
+		return nil, fmt.Errorf("unsupported page contents kind %v", contents.Kind())
+	}
+}
+
+func markdownImageForXObject(xobject pdf.Value, pageNum int, name string) (string, error) {
+	data, mediaType, err := imageAssetData(xobject)
+	if err != nil {
+		return fmt.Sprintf("[PDF image page %d %s error: %v]", pageNum, name, err), nil
+	}
+	if len(data) == 0 {
+		return fmt.Sprintf("[PDF image page %d %s skipped: empty image stream]", pageNum, name), nil
+	}
+	encoded := base64.StdEncoding.EncodeToString(data)
+	return fmt.Sprintf("![PDF image page %d %s](data:%s;base64,%s)", pageNum, name, mediaType, encoded), nil
+}
+
+func imageAssetData(xobject pdf.Value) ([]byte, string, error) {
+	width, height, bitsPerComponent, err := imageGeometry(xobject)
+	if err != nil {
+		return nil, "", err
+	}
+	mask := xobject.Key("Mask")
+	if !mask.IsNull() {
+		img, err := imageAssetImage(xobject, width, height, bitsPerComponent)
+		if err != nil {
+			return nil, "", err
+		}
+		alpha, err := imageMaskAlpha(mask, width, height)
+		if err != nil {
+			return nil, "", err
+		}
+		data, err := encodePNG(applyAlphaMask(img, alpha))
+		if err != nil {
+			return nil, "", err
+		}
+		return data, "image/png", nil
+	}
+
+	filter := terminalFilterName(xobject.Key("Filter"))
+	switch filter {
+	case "DCTDecode":
+		data, err := readAllStreamBytes(xobject)
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := jpeg.DecodeConfig(bytes.NewReader(data)); err != nil {
+			return nil, "", fmt.Errorf("invalid JPEG image stream: %w", err)
+		}
+		return data, "image/jpeg", nil
+	case "FlateDecode":
+		raw, err := readAllStreamBytes(xobject)
+		if err != nil {
+			return nil, "", err
+		}
+		data, err := rasterSamplesToPNG(raw, xobject.Key("ColorSpace"), width, height, bitsPerComponent)
+		if err != nil {
+			return nil, "", err
+		}
+		return data, "image/png", nil
+	case "CCITTFaxDecode":
+		data, err := ccittImageToPNG(xobject, width, height)
+		if err != nil {
+			return nil, "", err
+		}
+		return data, "image/png", nil
+	case "":
+		data, err := rawMaskToPNG(xobject, width, height, bitsPerComponent)
+		if err != nil {
+			return nil, "", err
+		}
+		return data, "image/png", nil
+	default:
+		return nil, "", fmt.Errorf("unsupported PDF image filter %q", filter)
+	}
+}
+
+func imageAssetImage(xobject pdf.Value, width int, height int, bitsPerComponent int) (image.Image, error) {
+	filter := terminalFilterName(xobject.Key("Filter"))
+	switch filter {
+	case "DCTDecode":
+		data, err := readAllStreamBytes(xobject)
+		if err != nil {
+			return nil, err
+		}
+		img, _, err := image.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("invalid JPEG image stream: %w", err)
+		}
+		return img, nil
+	case "FlateDecode":
+		raw, err := readAllStreamBytes(xobject)
+		if err != nil {
+			return nil, err
+		}
+		return rasterSamplesImage(raw, xobject.Key("ColorSpace"), width, height, bitsPerComponent)
+	case "CCITTFaxDecode":
+		return ccittImage(maskOrImageReader{xobject}, width, height, xobject.Key("DecodeParms").Key("K").Int64() >= 0)
+	case "":
+		return rawMaskImage(xobject, width, height, bitsPerComponent)
+	default:
+		return nil, fmt.Errorf("unsupported PDF image filter %q", filter)
+	}
+}
+
+func imageGeometry(xobject pdf.Value) (width int, height int, bitsPerComponent int, err error) {
+	width = int(xobject.Key("Width").Int64())
+	height = int(xobject.Key("Height").Int64())
+	if width <= 0 || height <= 0 {
+		return 0, 0, 0, fmt.Errorf("invalid PDF image dimensions %dx%d", width, height)
+	}
+	bitsPerComponent = int(xobject.Key("BitsPerComponent").Int64())
+	if bitsPerComponent == 0 && xobject.Key("ImageMask").Bool() {
+		bitsPerComponent = 1
+	}
+	if bitsPerComponent <= 0 {
+		return 0, 0, 0, fmt.Errorf("invalid PDF image bits-per-component %d", bitsPerComponent)
+	}
+	return width, height, bitsPerComponent, nil
+}
+
+func terminalFilterName(filter pdf.Value) string {
+	switch filter.Kind() {
+	case pdf.Name:
+		return filter.Name()
+	case pdf.Array:
+		if filter.Len() == 0 {
+			return ""
+		}
+		return filter.Index(filter.Len() - 1).Name()
+	default:
+		return ""
+	}
+}
+
+func readAllStreamBytes(stream pdf.Value) ([]byte, error) {
+	reader := stream.Reader()
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func rawMaskToPNG(xobject pdf.Value, width int, height int, bitsPerComponent int) ([]byte, error) {
+	img, err := rawMaskImage(xobject, width, height, bitsPerComponent)
+	if err != nil {
+		return nil, err
+	}
+	return encodePNG(img)
+}
+
+func ccittImageToPNG(xobject pdf.Value, width int, height int) ([]byte, error) {
+	img, err := ccittImage(maskOrImageReader{xobject}, width, height, xobject.Key("DecodeParms").Key("K").Int64() >= 0)
+	if err != nil {
+		return nil, err
+	}
+	return encodePNG(img)
+}
+
+func rasterSamplesToPNG(raw []byte, colorSpace pdf.Value, width int, height int, bitsPerComponent int) ([]byte, error) {
+	img, err := rasterSamplesImage(raw, colorSpace, width, height, bitsPerComponent)
+	if err != nil {
+		return nil, err
+	}
+	return encodePNG(img)
+}
+
+func rasterSamplesImage(raw []byte, colorSpace pdf.Value, width int, height int, bitsPerComponent int) (image.Image, error) {
+	if bitsPerComponent == 1 {
+		switch colorSpaceName(colorSpace) {
+		case "", "DeviceGray":
+			return packBitmapImage(raw, width, height, false)
+		case "Indexed":
+			return nil, fmt.Errorf("unsupported 1-bit indexed PDF image")
+		default:
+			return nil, fmt.Errorf("unsupported 1-bit PDF colorspace %q", colorSpaceName(colorSpace))
+		}
+	}
+
+	switch colorSpaceName(colorSpace) {
+	case "DeviceGray", "":
+		if bitsPerComponent != 8 {
+			return nil, fmt.Errorf("unsupported grayscale PDF image bits-per-component %d", bitsPerComponent)
+		}
+		expected := width * height
+		if len(raw) < expected {
+			return nil, fmt.Errorf("truncated grayscale PDF image data: got %d bytes want %d", len(raw), expected)
+		}
+		img := image.NewGray(image.Rect(0, 0, width, height))
+		copy(img.Pix, raw[:expected])
+		return img, nil
+	case "DeviceRGB":
+		if bitsPerComponent != 8 {
+			return nil, fmt.Errorf("unsupported RGB PDF image bits-per-component %d", bitsPerComponent)
+		}
+		expected := width * height * 3
+		if len(raw) < expected {
+			return nil, fmt.Errorf("truncated RGB PDF image data: got %d bytes want %d", len(raw), expected)
+		}
+		img := image.NewRGBA(image.Rect(0, 0, width, height))
+		src := raw[:expected]
+		dst := img.Pix
+		for i, j := 0, 0; i < expected; i, j = i+3, j+4 {
+			dst[j+0] = src[i+0]
+			dst[j+1] = src[i+1]
+			dst[j+2] = src[i+2]
+			dst[j+3] = 0xFF
+		}
+		return img, nil
+	case "Indexed":
+		if bitsPerComponent != 8 {
+			return nil, fmt.Errorf("unsupported indexed PDF image bits-per-component %d", bitsPerComponent)
+		}
+		palette, err := indexedPalette(colorSpace)
+		if err != nil {
+			return nil, err
+		}
+		expected := width * height
+		if len(raw) < expected {
+			return nil, fmt.Errorf("truncated indexed PDF image data: got %d bytes want %d", len(raw), expected)
+		}
+		img := image.NewPaletted(image.Rect(0, 0, width, height), palette)
+		copy(img.Pix, raw[:expected])
+		return img, nil
+	default:
+		return nil, fmt.Errorf("unsupported PDF image colorspace %q", colorSpaceName(colorSpace))
+	}
+}
+
+type maskOrImageReader struct {
+	value pdf.Value
+}
+
+func (m maskOrImageReader) ReadAll() ([]byte, error) {
+	return readAllStreamBytes(m.value)
+}
+
+func rawMaskImage(xobject pdf.Value, width int, height int, bitsPerComponent int) (image.Image, error) {
+	if bitsPerComponent != 1 {
+		return nil, fmt.Errorf("unsupported unfiltered PDF image bits-per-component %d", bitsPerComponent)
+	}
+	raw, err := readAllStreamBytes(xobject)
+	if err != nil {
+		return nil, err
+	}
+	return packBitmapImage(raw, width, height, false)
+}
+
+func ccittImage(reader maskOrImageReader, width int, height int, group3 bool) (image.Image, error) {
+	stream := reader.value.Reader()
+	defer stream.Close()
+
+	subformat := ccitt.Group4
+	if group3 {
+		subformat = ccitt.Group3
+	}
+	ccittReader := ccitt.NewReader(stream, ccitt.MSB, subformat, width, height, &ccitt.Options{})
+	raw, err := io.ReadAll(ccittReader)
+	if err != nil {
+		return nil, fmt.Errorf("invalid CCITT image stream: %w", err)
+	}
+	return packBitmapImage(raw, width, height, false)
+}
+
+func colorSpaceName(colorSpace pdf.Value) string {
+	switch colorSpace.Kind() {
+	case pdf.Name:
+		return colorSpace.Name()
+	case pdf.Array:
+		return colorSpace.Index(0).Name()
+	default:
+		return ""
+	}
+}
+
+func indexedPalette(colorSpace pdf.Value) (color.Palette, error) {
+	if colorSpace.Kind() != pdf.Array || colorSpace.Len() < 4 || colorSpace.Index(0).Name() != "Indexed" {
+		return nil, fmt.Errorf("unsupported indexed PDF colorspace")
+	}
+	if colorSpace.Index(1).Name() != "DeviceRGB" {
+		return nil, fmt.Errorf("unsupported indexed PDF base colorspace %q", colorSpace.Index(1).Name())
+	}
+	hi := int(colorSpace.Index(2).Int64())
+	if hi < 0 {
+		return nil, fmt.Errorf("invalid indexed PDF palette size %d", hi)
+	}
+	lookup, err := lookupBytes(colorSpace.Index(3))
+	if err != nil {
+		return nil, err
+	}
+	required := (hi + 1) * 3
+	if len(lookup) < required {
+		return nil, fmt.Errorf("truncated indexed PDF palette: got %d bytes want %d", len(lookup), required)
+	}
+	palette := make(color.Palette, hi+1)
+	for index := range palette {
+		offset := index * 3
+		palette[index] = color.RGBA{
+			R: lookup[offset+0],
+			G: lookup[offset+1],
+			B: lookup[offset+2],
+			A: 0xFF,
+		}
+	}
+	return palette, nil
+}
+
+func lookupBytes(value pdf.Value) ([]byte, error) {
+	switch value.Kind() {
+	case pdf.String:
+		return []byte(value.RawString()), nil
+	case pdf.Stream:
+		return readAllStreamBytes(value)
+	default:
+		return nil, fmt.Errorf("unsupported indexed PDF palette lookup type %v", value.Kind())
+	}
+}
+
+func packBitmapToPNG(raw []byte, width int, height int) ([]byte, error) {
+	img, err := packBitmapImage(raw, width, height, false)
+	if err != nil {
+		return nil, err
+	}
+	return encodePNG(img)
+}
+
+func packBitmapImage(raw []byte, width int, height int, invert bool) (*image.Gray, error) {
+	img := image.NewGray(image.Rect(0, 0, width, height))
+	rowBytes := (width + 7) / 8
+	for y := 0; y < height; y++ {
+		if y*rowBytes >= len(raw) {
+			break
+		}
+		row := raw[y*rowBytes:]
+		for x := 0; x < width; x++ {
+			byteIndex := x / 8
+			bitIndex := uint(7 - (x % 8))
+			if byteIndex >= len(row) {
+				break
+			}
+			bit := (row[byteIndex] >> bitIndex) & 1
+			if invert {
+				bit ^= 1
+			}
+			if bit == 1 {
+				img.SetGray(x, y, color.Gray{Y: 0xFF})
+			} else {
+				img.SetGray(x, y, color.Gray{Y: 0x00})
+			}
+		}
+	}
+	return img, nil
+}
+
+func imageMaskAlpha(mask pdf.Value, width int, height int) (*image.Alpha, error) {
+	maskWidth, maskHeight, bitsPerComponent, err := imageGeometry(mask)
+	if err != nil {
+		return nil, err
+	}
+	if maskWidth != width || maskHeight != height {
+		return nil, fmt.Errorf("PDF image mask dimensions %dx%d do not match image dimensions %dx%d", maskWidth, maskHeight, width, height)
+	}
+	if bitsPerComponent != 1 {
+		return nil, fmt.Errorf("unsupported PDF image mask bits-per-component %d", bitsPerComponent)
+	}
+
+	var raw []byte
+	switch terminalFilterName(mask.Key("Filter")) {
+	case "CCITTFaxDecode":
+		stream := mask.Reader()
+		defer stream.Close()
+		subformat := ccitt.Group4
+		if mask.Key("DecodeParms").Key("K").Int64() >= 0 {
+			subformat = ccitt.Group3
+		}
+		reader := ccitt.NewReader(stream, ccitt.MSB, subformat, width, height, &ccitt.Options{})
+		raw, err = io.ReadAll(reader)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CCITT image mask stream: %w", err)
+		}
+	case "", "FlateDecode":
+		raw, err = readAllStreamBytes(mask)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported PDF image mask filter %q", terminalFilterName(mask.Key("Filter")))
+	}
+
+	invert := false
+	decode := mask.Key("Decode")
+	if decode.Kind() == pdf.Array && decode.Len() >= 2 {
+		invert = decode.Index(0).Float64() > decode.Index(1).Float64()
+	}
+	gray, err := packBitmapImage(raw, width, height, invert)
+	if err != nil {
+		return nil, err
+	}
+	alpha := image.NewAlpha(gray.Bounds())
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			// PDF image masks paint on 0 by default; convert that to opaque alpha.
+			if gray.GrayAt(x, y).Y == 0xFF {
+				alpha.SetAlpha(x, y, color.Alpha{A: 0x00})
+			} else {
+				alpha.SetAlpha(x, y, color.Alpha{A: 0xFF})
+			}
+		}
+	}
+	return alpha, nil
+}
+
+func applyAlphaMask(img image.Image, alpha *image.Alpha) image.Image {
+	bounds := img.Bounds()
+	out := image.NewNRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			a := alpha.AlphaAt(x, y).A
+			out.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(r >> 8),
+				G: uint8(g >> 8),
+				B: uint8(b >> 8),
+				A: a,
+			})
+		}
+	}
+	return out
+}
+
+func encodePNG(img image.Image) ([]byte, error) {
+	var buffer bytes.Buffer
+	if err := png.Encode(&buffer, img); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}

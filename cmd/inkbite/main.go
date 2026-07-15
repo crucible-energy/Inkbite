@@ -16,6 +16,7 @@ import (
 	"github.com/LynnColeArt/Inkbite/builtins"
 	"github.com/LynnColeArt/Inkbite/internal/components"
 	"github.com/LynnColeArt/Inkbite/internal/ocr"
+	"github.com/LynnColeArt/Inkbite/visualpdf"
 )
 
 var version = "dev"
@@ -48,12 +49,75 @@ func run(args []string, stdout io.Writer, stderr io.Writer, deps runtimeDeps) in
 			return runDoctor(stdout, stderr, deps)
 		case "config":
 			return runConfig(args[1:], stdout, stderr, deps)
+		case "visual":
+			return runVisual(args[1:], stdout, stderr, deps.version)
 		case "__ocr_helper":
 			return runOCRHelper(args[1:], stdout, stderr)
 		}
 	}
 
 	return runConvert(args, stdout, stderr, deps.version)
+}
+
+func runVisual(args []string, stdout io.Writer, stderr io.Writer, version string) int {
+	if len(args) == 0 || !strings.EqualFold(strings.TrimSpace(args[0]), "pdf") {
+		fmt.Fprintln(stderr, "usage: inkbite visual pdf --input local.pdf --output package-dir --poppler-dir pinned-dir --poppler-version version --profiles profiles.json [--woff2-subsetter executable --woff2-subsetter-version version]")
+		return 1
+	}
+	return runVisualPDF(args[1:], stdout, stderr, version)
+}
+
+func runVisualPDF(args []string, stdout io.Writer, stderr io.Writer, version string) int {
+	flags := flag.NewFlagSet("visual pdf", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	var input, output, popplerDirectory, popplerVersion, profilePath, woff2SubsetterPath, woff2SubsetterVersion string
+	flags.StringVar(&input, "input", "", "local PDF input")
+	flags.StringVar(&output, "output", "", "new visual package directory")
+	flags.StringVar(&popplerDirectory, "poppler-dir", "", "pinned Poppler toolchain directory")
+	flags.StringVar(&popplerVersion, "poppler-version", "", "required Poppler version")
+	flags.StringVar(&profilePath, "profiles", "", "versioned visual profile set JSON")
+	flags.StringVar(&woff2SubsetterPath, "woff2-subsetter", "", "optional pinned WOFF2 subsetter executable")
+	flags.StringVar(&woff2SubsetterVersion, "woff2-subsetter-version", "", "required WOFF2 subsetter version")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "visual pdf accepts only named flags")
+		return 1
+	}
+	profiles, err := visualpdf.LoadProfileSet(profilePath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	options := visualpdf.CompileOptions{
+		InputPath:       input,
+		OutputDirectory: output,
+		Toolchain: visualpdf.Toolchain{
+			Directory: popplerDirectory,
+			Version:   popplerVersion,
+		},
+		Profiles:        profiles.Profiles,
+		CompilerVersion: version,
+	}
+	if woff2SubsetterPath != "" || woff2SubsetterVersion != "" {
+		options.WOFF2Subsetter = &visualpdf.WOFF2Subsetter{Path: woff2SubsetterPath, Version: woff2SubsetterVersion}
+	}
+	manifest, err := visualpdf.Compile(context.Background(), options)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	fmt.Fprintln(stdout, string(data))
+	return 0
 }
 
 func runConvert(args []string, stdout io.Writer, stderr io.Writer, version string) int {
