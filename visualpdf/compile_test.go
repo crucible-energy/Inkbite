@@ -32,6 +32,9 @@ func TestCompileEmitsVerifiedPackageWithSourceText(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("FAKE_PNG_BASE64", base64.StdEncoding.EncodeToString(fixtureData))
+	if _, _, err := decodeSVGImageDataURI("data:image/png;base64," + base64.StdEncoding.EncodeToString(fixtureData)); err != nil {
+		t.Fatalf("fixture data URI must be valid: %v", err)
+	}
 	writeTool(t, tools, "pdfinfo", `
 if [ "$1" = "-v" ]; then echo "pdfinfo version 1.2.3"; exit 0; fi
 case " $* " in *" -f "*) echo "Page size: 72 x 72 pts";; *) echo "Pages: 1";; esac
@@ -166,6 +169,27 @@ func TestValidateSVGRejectsResponsiveImageMetadata(t *testing.T) {
 	}
 	if err := validateSVG(svg); err == nil || !strings.Contains(err.Error(), "responsive-image") {
 		t.Fatalf("expected responsive image metadata rejection, got %v", err)
+	}
+}
+
+func TestValidateSVGRejectsExecutableAndStylesheetBypasses(t *testing.T) {
+	directory := t.TempDir()
+	for name, document := range map[string]string{
+		"event":     `<svg onbegin="run()"/>`,
+		"import":    `<svg><style>@import "https://example.invalid/chart.css";</style></svg>`,
+		"directive": `<!DOCTYPE svg><svg/>`,
+		"malformed": `<svg><path></svg>`,
+		"data-link": `<svg><a href="data:text/html;base64,PHNjcmlwdD4=">unsafe</a></svg>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(directory, name+".svg")
+			if err := os.WriteFile(path, []byte(document), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := validateSVG(path); err == nil {
+				t.Fatalf("validateSVG(%s) unexpectedly accepted %q", name, document)
+			}
+		})
 	}
 }
 
