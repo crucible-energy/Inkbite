@@ -3,6 +3,7 @@ package pdfconv
 import (
 	"bytes"
 	"image/png"
+	"slices"
 	"testing"
 )
 
@@ -37,6 +38,36 @@ func TestExtractPageRasterAssetsKeepsMaskSeparate(t *testing.T) {
 	}
 	if assets[1].Name != "Im1-mask" || assets[1].Role != "mask" || assets[1].MaskFor != "Im1" || assets[1].Encoding != "lossless_png" {
 		t.Fatalf("unexpected mask asset: %#v", assets[1])
+	}
+	wantPlacement := RasterPlacement{Matrix: [6]float64{2, 0, 0, 1, 0, 0}}
+	if len(assets[0].Placements) != 1 || assets[0].Placements[0] != wantPlacement || len(assets[1].Placements) != 1 || assets[1].Placements[0] != wantPlacement {
+		t.Fatalf("unexpected image/mask placement: %#v", assets)
+	}
+}
+
+func TestExtractPageRasterAssetsRecordsEveryPaintedPlacement(t *testing.T) {
+	content := []byte("q\n2 0 0 1 0 0 cm\n/Im1 Do\nQ\nq\n1 0 0 1 10 20 cm\n/Im1 Do\nQ")
+	assets, err := ExtractPageRasterAssets(makeGrayImagePDFWithContent(1, 1, []byte{0x00}, content), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRasterAssets() error = %v", err)
+	}
+	want := []RasterPlacement{
+		{Matrix: [6]float64{2, 0, 0, 1, 0, 0}},
+		{Matrix: [6]float64{1, 0, 0, 1, 10, 20}},
+	}
+	if len(assets) != 1 || !slices.Equal(assets[0].Placements, want) {
+		t.Fatalf("unexpected repeated placements: %#v", assets)
+	}
+}
+
+func TestExtractPageRasterAssetsCarriesPlacementAcrossContentStreams(t *testing.T) {
+	assets, err := ExtractPageRasterAssets(makeGrayImagePDFWithArrayContents(1, 1, []byte{0x00}), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRasterAssets() error = %v", err)
+	}
+	want := RasterPlacement{Matrix: [6]float64{2, 0, 0, 3, 24, 65}}
+	if len(assets) != 1 || len(assets[0].Placements) != 1 || assets[0].Placements[0] != want {
+		t.Fatalf("unexpected array-content placement: %#v", assets)
 	}
 }
 

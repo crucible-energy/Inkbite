@@ -365,12 +365,29 @@ func makeTwoPagePDF(first, second string) []byte {
 
 func makeGrayImagePDF(width, height int, pixels []byte) []byte {
 	content := []byte("q\n2 0 0 1 0 0 cm\n/Im1 Do\nQ")
+	return makeGrayImagePDFWithContent(width, height, pixels, content)
+}
 
+func makeGrayImagePDFWithContent(width, height int, pixels, content []byte) []byte {
 	objects := [][]byte{
 		[]byte("<< /Type /Catalog /Pages 2 0 R >>"),
 		[]byte("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
 		[]byte("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>"),
 		[]byte(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content)),
+		makeGrayImageXObject(width, height, pixels),
+	}
+	return makeBinaryPDF(objects)
+}
+
+func makeGrayImagePDFWithArrayContents(width, height int, pixels []byte) []byte {
+	first := []byte("q\n2 0 0 3 4 5 cm")
+	second := []byte("1 0 0 1 10 20 cm\n/Im1 Do\nQ")
+	objects := [][]byte{
+		[]byte("<< /Type /Catalog /Pages 2 0 R >>"),
+		[]byte("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+		[]byte("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents [4 0 R 5 0 R] /Resources << /XObject << /Im1 6 0 R >> >> >>"),
+		[]byte(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(first), first)),
+		[]byte(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(second), second)),
 		makeGrayImageXObject(width, height, pixels),
 	}
 	return makeBinaryPDF(objects)

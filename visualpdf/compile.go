@@ -488,8 +488,12 @@ func emitSourceRasterAssets(document []byte, output string, page int, pageDirect
 		if err != nil {
 			return nil, err
 		}
+		placements := make([]SourceRasterPlacement, len(asset.Placements))
+		for index, placement := range asset.Placements {
+			placements[index] = SourceRasterPlacement{Matrix: placement.Matrix}
+		}
 		result = append(result, SourceRasterAsset{
-			Name: asset.Name, Role: asset.Role, MaskFor: asset.MaskFor, Encoding: asset.Encoding, Artifact: artifact,
+			Name: asset.Name, Role: asset.Role, MaskFor: asset.MaskFor, Placements: placements, Encoding: asset.Encoding, Artifact: artifact,
 		})
 	}
 	return result, nil

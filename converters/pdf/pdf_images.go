@@ -9,6 +9,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -24,12 +25,19 @@ var doOperatorPattern = regexp.MustCompile(`/([^\s<>\[\]\(\)%/]+)\s+Do\b`)
 // raster encodings become lossless PNG only after their decoded pixels are
 // verified locally.
 type RasterAsset struct {
-	Name      string
-	Role      string
-	MaskFor   string
-	MediaType string
-	Encoding  string
-	Bytes     []byte
+	Name       string
+	Role       string
+	MaskFor    string
+	Placements []RasterPlacement
+	MediaType  string
+	Encoding   string
+	Bytes      []byte
+}
+
+// RasterPlacement is the PDF user-space transform in effect when an image
+// XObject is painted. Matrix uses the PDF/SVG [a b c d e f] ordering.
+type RasterPlacement struct {
+	Matrix [6]float64
 }
 
 // ExtractPageRasterAssets returns only image XObjects painted by one PDF page.
@@ -54,19 +62,20 @@ func ExtractPageRasterAssets(document []byte, pageNumber int) ([]RasterAsset, er
 }
 
 func pageRasterAssets(page pdf.Page) ([]RasterAsset, error) {
-	referenced, err := referencedXObjectNames(page)
+	placements, err := referencedXObjectPlacements(page)
 	if err != nil {
 		return nil, err
 	}
-	if len(referenced) == 0 {
+	if len(placements) == 0 {
 		return []RasterAsset{}, nil
 	}
 	xobjects := page.Resources().Key("XObject")
 	names := xobjects.Keys()
 	sort.Strings(names)
-	assets := make([]RasterAsset, 0, len(referenced))
+	assets := make([]RasterAsset, 0, len(placements))
 	for _, name := range names {
-		if _, ok := referenced[name]; !ok {
+		painted, ok := placements[name]
+		if !ok {
 			continue
 		}
 		xobject := xobjects.Key(name)
@@ -77,7 +86,9 @@ func pageRasterAssets(page pdf.Page) ([]RasterAsset, error) {
 		if err != nil {
 			return nil, fmt.Errorf("image XObject %s: %w", name, err)
 		}
-		assets = append(assets, RasterAsset{Name: name, Role: "image", MediaType: mediaType, Encoding: encoding, Bytes: data})
+		assets = append(assets, RasterAsset{
+			Name: name, Role: "image", Placements: painted, MediaType: mediaType, Encoding: encoding, Bytes: data,
+		})
 		for _, key := range []string{"Mask", "SMask"} {
 			mask := xobject.Key(key)
 			if mask.IsNull() {
@@ -91,16 +102,141 @@ func pageRasterAssets(page pdf.Page) ([]RasterAsset, error) {
 				return nil, fmt.Errorf("image XObject %s %s: %w", name, key, maskErr)
 			}
 			assets = append(assets, RasterAsset{
-				Name:      name + "-" + strings.ToLower(key),
-				Role:      "mask",
-				MaskFor:   name,
-				MediaType: maskMediaType,
-				Encoding:  maskEncoding,
-				Bytes:     maskData,
+				Name:       name + "-" + strings.ToLower(key),
+				Role:       "mask",
+				MaskFor:    name,
+				Placements: painted,
+				MediaType:  maskMediaType,
+				Encoding:   maskEncoding,
+				Bytes:      maskData,
 			})
 		}
 	}
 	return assets, nil
+}
+
+func referencedXObjectPlacements(page pdf.Page) (placements map[string][]RasterPlacement, err error) {
+	placements = make(map[string][]RasterPlacement)
+	current := identityRasterPlacement()
+	var stack []RasterPlacement
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			placements = nil
+			err = fmt.Errorf("interpret page graphics state: %v", recovered)
+		}
+	}()
+	if err = interpretContentStreams(page.V.Key("Contents"), func(stream pdf.Value) {
+		pdf.Interpret(stream, func(values *pdf.Stack, operator string) {
+			if err != nil {
+				return
+			}
+			arguments := popPDFArguments(values)
+			switch operator {
+			case "q":
+				if len(arguments) != 0 {
+					err = fmt.Errorf("q has %d arguments", len(arguments))
+					return
+				}
+				stack = append(stack, current)
+			case "Q":
+				if len(arguments) != 0 {
+					err = fmt.Errorf("Q has %d arguments", len(arguments))
+					return
+				}
+				if len(stack) == 0 {
+					err = fmt.Errorf("unbalanced Q graphics-state restore")
+					return
+				}
+				current = stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+			case "cm":
+				matrix, matrixErr := rasterPlacementMatrix(arguments)
+				if matrixErr != nil {
+					err = matrixErr
+					return
+				}
+				current = composeRasterPlacements(matrix, current)
+			case "Do":
+				if len(arguments) != 1 || arguments[0].Kind() != pdf.Name || arguments[0].Name() == "" {
+					err = fmt.Errorf("Do has invalid XObject name")
+					return
+				}
+				name := arguments[0].Name()
+				placements[name] = append(placements[name], current)
+			}
+		})
+	}); err != nil {
+		return nil, err
+	}
+	if len(stack) != 0 {
+		return nil, fmt.Errorf("unbalanced q graphics-state save")
+	}
+	return placements, nil
+}
+
+func interpretContentStreams(contents pdf.Value, interpret func(pdf.Value)) error {
+	switch contents.Kind() {
+	case pdf.Null:
+		return nil
+	case pdf.Stream:
+		interpret(contents)
+		return nil
+	case pdf.Array:
+		for index := 0; index < contents.Len(); index++ {
+			if err := interpretContentStreams(contents.Index(index), interpret); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported page contents kind %v", contents.Kind())
+	}
+}
+
+func popPDFArguments(values *pdf.Stack) []pdf.Value {
+	arguments := make([]pdf.Value, values.Len())
+	for index := len(arguments) - 1; index >= 0; index-- {
+		arguments[index] = values.Pop()
+	}
+	return arguments
+}
+
+func identityRasterPlacement() RasterPlacement {
+	return RasterPlacement{Matrix: [6]float64{1, 0, 0, 1, 0, 0}}
+}
+
+func rasterPlacementMatrix(arguments []pdf.Value) (RasterPlacement, error) {
+	if len(arguments) != 6 {
+		return RasterPlacement{}, fmt.Errorf("cm has %d arguments", len(arguments))
+	}
+	var matrix RasterPlacement
+	for index, argument := range arguments {
+		if argument.Kind() != pdf.Integer && argument.Kind() != pdf.Real {
+			return RasterPlacement{}, fmt.Errorf("cm argument %d is not numeric", index)
+		}
+		component := argument.Float64()
+		if math.IsNaN(component) || math.IsInf(component, 0) {
+			return RasterPlacement{}, fmt.Errorf("cm argument %d is not finite", index)
+		}
+		matrix.Matrix[index] = component
+	}
+	return matrix, nil
+}
+
+// composeRasterPlacements matches the PDF graphics-state rule used by the
+// parser: a cm matrix is prepended to the current transformation matrix.
+func composeRasterPlacements(next, current RasterPlacement) RasterPlacement {
+	a, b, c, d, e, f := next.Matrix[0], next.Matrix[1], next.Matrix[2], next.Matrix[3], next.Matrix[4], next.Matrix[5]
+	g, h, i, j, k, l := current.Matrix[0], current.Matrix[1], current.Matrix[2], current.Matrix[3], current.Matrix[4], current.Matrix[5]
+	return RasterPlacement{Matrix: [6]float64{
+		a*g + b*i,
+		a*h + b*j,
+		c*g + d*i,
+		c*h + d*j,
+		e*g + f*i + k,
+		e*h + f*j + l,
+	}}
 }
 
 func sourceRasterAssetData(xobject pdf.Value) ([]byte, string, string, error) {

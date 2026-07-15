@@ -70,6 +70,9 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	if manifest.Source.Locator != "source.pdf" || manifest.Source.SHA256 == "" {
 		t.Fatalf("unexpected source manifest: %#v", manifest.Source)
 	}
+	if manifest.SchemaVersion != "inkbite.visualpdf.manifest.v3" {
+		t.Fatalf("unexpected visual manifest schema: %q", manifest.SchemaVersion)
+	}
 	if len(manifest.Pages) != 1 || manifest.Pages[0].State != PageVerifiedSVG {
 		t.Fatalf("expected one verified SVG page, got %#v", manifest.Pages)
 	}
@@ -289,6 +292,9 @@ func TestEmitSourceRasterAssetsWritesLosslessSidecars(t *testing.T) {
 	}
 	if len(assets) != 1 || assets[0].Encoding != "lossless_png" || assets[0].Artifact.MediaType != "image/png" {
 		t.Fatalf("unexpected source raster assets: %#v", assets)
+	}
+	if len(assets[0].Placements) != 1 || assets[0].Placements[0].Matrix != [6]float64{2, 0, 0, 1, 0, 0} {
+		t.Fatalf("unexpected source raster placement: %#v", assets[0].Placements)
 	}
 	file, err := os.Open(filepath.Join(output, filepath.FromSlash(assets[0].Artifact.Locator)))
 	if err != nil {

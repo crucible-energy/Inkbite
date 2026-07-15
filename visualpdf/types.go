@@ -10,7 +10,7 @@ import "time"
 
 const (
 	// ManifestSchemaVersion is the version of the emitted visual package manifest.
-	ManifestSchemaVersion = "inkbite.visualpdf.manifest.v2"
+	ManifestSchemaVersion = "inkbite.visualpdf.manifest.v3"
 	// ProfileSetSchemaVersion is the version of a visual profile set document.
 	ProfileSetSchemaVersion = "inkbite.visualpdf.profiles.v2"
 )
@@ -153,11 +153,19 @@ type RemediationItem struct {
 // JPEG bytes or lossless decoded pixels for fidelity review and future SVG
 // asset placement; they are not a substitute for the verified display asset.
 type SourceRasterAsset struct {
-	Name     string   `json:"name"`
-	Role     string   `json:"role"`
-	MaskFor  string   `json:"mask_for,omitempty"`
-	Encoding string   `json:"encoding"`
-	Artifact Artifact `json:"artifact"`
+	Name       string                  `json:"name"`
+	Role       string                  `json:"role"`
+	MaskFor    string                  `json:"mask_for,omitempty"`
+	Placements []SourceRasterPlacement `json:"placements"`
+	Encoding   string                  `json:"encoding"`
+	Artifact   Artifact                `json:"artifact"`
+}
+
+// SourceRasterPlacement records the PDF/SVG [a b c d e f] transform for each
+// time a source image XObject was painted. A mask shares its image's placement
+// until a verified SVG reconstruction can consume that relationship.
+type SourceRasterPlacement struct {
+	Matrix [6]float64 `json:"matrix"`
 }
 
 // PageManifest contains every display, semantic, and visual-verification
