@@ -139,6 +139,16 @@ func TestValidateSVGRejectsUnlistedCSSResource(t *testing.T) {
 	}
 }
 
+func TestValidateSVGRejectsResponsiveImageMetadata(t *testing.T) {
+	svg := filepath.Join(t.TempDir(), "responsive.svg")
+	if err := os.WriteFile(svg, []byte(`<svg><image srcset="one.png 1x" sizes="100vw"/></svg>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSVG(svg); err == nil || !strings.Contains(err.Error(), "responsive-image") {
+		t.Fatalf("expected responsive image metadata rejection, got %v", err)
+	}
+}
+
 func TestLoadProfileSetPinsCalibrationEvidence(t *testing.T) {
 	root := t.TempDir()
 	calibrationPath := filepath.Join(root, "calibration.md")

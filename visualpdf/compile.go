@@ -758,6 +758,9 @@ func validateSVG(path string) error {
 	if !strings.Contains(lower, "<svg") || strings.Contains(lower, "<script") || strings.Contains(lower, "<foreignobject") || strings.Contains(lower, "<iframe") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<!entity") {
 		return errors.New("SVG contains an unsupported structural construct")
 	}
+	if strings.Contains(lower, "srcset=") || strings.Contains(lower, "sizes=") {
+		return errors.New("SVG contains unsupported responsive-image metadata")
+	}
 	for _, match := range svgResourceRef.FindAllStringSubmatch(lower, -1) {
 		if !safeSVGResourceReference(match[1]) {
 			return errors.New("SVG contains an unsafe external resource reference")
