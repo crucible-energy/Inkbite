@@ -224,6 +224,8 @@ inkbite visual pdf \
   --output /new/visual-package \
   --poppler-dir /pinned/poppler/bin \
   --poppler-version 26.07.0 \
+  --woff2-subsetter /pinned/woff2-subsetter \
+  --woff2-subsetter-version 1.0.0 \
   --profiles ./visualpdf/profiles/iris-offline-webview-v2.json
 ```
 

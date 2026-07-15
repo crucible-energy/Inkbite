@@ -14,7 +14,7 @@ import (
 // future positioned-text candidate must satisfy. It deliberately does not
 // guess at a substitute font: only embedded TrueType programs with a PDF
 // ToUnicode map and an embedding policy that permits subsetting are eligible.
-func sourceAwareEligibility(document []byte, pageNumber int) (reason string) {
+func sourceAwareEligibility(document []byte, pageNumber int, hasWOFF2Subsetter bool) (reason string) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			reason = fmt.Sprintf("source-aware font inspection failed: %v", recovered)
@@ -73,7 +73,10 @@ func sourceAwareEligibility(document []byte, pageNumber int) (reason string) {
 			return fmt.Sprintf("source-aware text candidate font %q %s", name, failure)
 		}
 	}
-	return "source-aware text candidate requires a pinned WOFF2 subsetter; outlined glyph candidate remains required"
+	if !hasWOFF2Subsetter {
+		return "source-aware text candidate requires a pinned WOFF2 subsetter; outlined glyph candidate remains required"
+	}
+	return "source-aware text candidate requires positioned text SVG emission; outlined glyph candidate remains required"
 }
 
 func fontSubsetPrefix(name string) string {

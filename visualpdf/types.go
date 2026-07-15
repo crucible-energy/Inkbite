@@ -23,6 +23,14 @@ type Toolchain struct {
 	Version   string `json:"version"`
 }
 
+// WOFF2Subsetter identifies the optional build-time executable that produces
+// source-font subsets. It must support --version and report Version exactly as
+// a substring; without it, source-aware text remains unavailable.
+type WOFF2Subsetter struct {
+	Path    string `json:"path"`
+	Version string `json:"version"`
+}
+
 // SVGRenderer describes the qualified offline WebView-profile renderer used
 // only during build verification. Arguments must contain exactly one {input}
 // and one {output} placeholder. Width and height placeholders are optional.
@@ -66,6 +74,7 @@ type CompileOptions struct {
 	InputPath       string
 	OutputDirectory string
 	Toolchain       Toolchain
+	WOFF2Subsetter  *WOFF2Subsetter
 	Profiles        []VisualProfile
 	CompilerVersion string
 	Now             func() time.Time
@@ -190,6 +199,7 @@ type Manifest struct {
 	GeneratedAt      string            `json:"generated_at"`
 	Source           Artifact          `json:"source"`
 	Toolchain        Toolchain         `json:"toolchain"`
+	WOFF2Subsetter   *WOFF2Subsetter   `json:"woff2_subsetter,omitempty"`
 	Pages            []PageManifest    `json:"pages"`
 	RemediationQueue []RemediationItem `json:"remediation_queue"`
 }

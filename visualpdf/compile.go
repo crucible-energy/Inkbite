@@ -92,6 +92,10 @@ func Compile(ctx context.Context, options CompileOptions) (Manifest, error) {
 	if err := verifyToolchain(ctx, tools, options.Toolchain.Version); err != nil {
 		return Manifest{}, err
 	}
+	woff2Subsetter, err := resolveWOFF2Subsetter(ctx, options.WOFF2Subsetter)
+	if err != nil {
+		return Manifest{}, err
+	}
 
 	output, err := filepath.Abs(options.OutputDirectory)
 	if err != nil {
@@ -135,12 +139,13 @@ func Compile(ctx context.Context, options CompileOptions) (Manifest, error) {
 		GeneratedAt:      compilationTime(options).UTC().Format(time.RFC3339),
 		Source:           sourceArtifact,
 		Toolchain:        options.Toolchain,
+		WOFF2Subsetter:   woff2Subsetter,
 		Pages:            make([]PageManifest, 0, pageCount),
 		RemediationQueue: []RemediationItem{},
 	}
 
 	for page := 1; page <= pageCount; page++ {
-		pageManifest, remediation, err := compilePage(ctx, output, sourcePath, sourceDocument, tools, options.Profiles, page, pageDimensions[page-1])
+		pageManifest, remediation, err := compilePage(ctx, output, sourcePath, sourceDocument, tools, options.Profiles, woff2Subsetter != nil, page, pageDimensions[page-1])
 		if err != nil {
 			return Manifest{}, fmt.Errorf("compile page %d: %w", page, err)
 		}
@@ -179,6 +184,9 @@ func validateOptions(options CompileOptions) error {
 	}
 	if strings.TrimSpace(options.Toolchain.Directory) == "" || strings.TrimSpace(options.Toolchain.Version) == "" {
 		return errors.New("pinned Poppler directory and version are required")
+	}
+	if options.WOFF2Subsetter != nil && (strings.TrimSpace(options.WOFF2Subsetter.Path) == "" || strings.TrimSpace(options.WOFF2Subsetter.Version) == "") {
+		return errors.New("pinned WOFF2 subsetter path and version are both required")
 	}
 	if err := validateProfiles(options.Profiles); err != nil {
 		return err
@@ -334,6 +342,28 @@ func verifyToolchain(ctx context.Context, tools toolPaths, expectedVersion strin
 	return nil
 }
 
+func resolveWOFF2Subsetter(ctx context.Context, configured *WOFF2Subsetter) (*WOFF2Subsetter, error) {
+	if configured == nil {
+		return nil, nil
+	}
+	path, err := filepath.Abs(configured.Path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve WOFF2 subsetter: %w", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+		return nil, errors.New("pinned WOFF2 subsetter is unavailable or not executable")
+	}
+	output, err := run(ctx, path, "--version")
+	if err != nil {
+		return nil, fmt.Errorf("run pinned WOFF2 subsetter: %w", err)
+	}
+	if !strings.Contains(string(output), configured.Version) {
+		return nil, fmt.Errorf("pinned WOFF2 subsetter did not report required version %q", configured.Version)
+	}
+	return &WOFF2Subsetter{Path: path, Version: configured.Version}, nil
+}
+
 func createEmptyOutputDirectory(output string) error {
 	if info, err := os.Stat(output); err == nil {
 		if !info.IsDir() {
@@ -396,6 +426,7 @@ func compilePage(
 	sourceDocument []byte,
 	tools toolPaths,
 	profiles []VisualProfile,
+	hasWOFF2Subsetter bool,
 	page int,
 	dimensions PageDimensions,
 ) (PageManifest, *RemediationItem, error) {
@@ -420,7 +451,7 @@ func compilePage(
 	if err != nil {
 		return PageManifest{}, nil, err
 	}
-	sourceAware := unavailableSourceAwareCandidate(sourceAwareEligibility(sourceDocument, page))
+	sourceAware := unavailableSourceAwareCandidate(sourceAwareEligibility(sourceDocument, page, hasWOFF2Subsetter))
 	candidates := []Candidate{outlined, sourceAware}
 	verified := make([]Candidate, 0, 1)
 	for _, candidate := range candidates {

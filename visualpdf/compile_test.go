@@ -53,10 +53,13 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	input := filepath.Join(root, "source.pdf")
 	writeValidPDF(t, input)
 	output := filepath.Join(root, "package")
+	subsetter := filepath.Join(root, "woff2-subsetter")
+	writeTool(t, root, "woff2-subsetter", `if [ "$1" = "--version" ]; then echo "woff2-subsetter 1.0"; exit 0; fi; exit 1`)
 	manifest, err := Compile(context.Background(), CompileOptions{
 		InputPath:       input,
 		OutputDirectory: output,
 		Toolchain:       Toolchain{Directory: tools, Version: "1.2.3"},
+		WOFF2Subsetter:  &WOFF2Subsetter{Path: subsetter, Version: "1.0"},
 		Profiles: []VisualProfile{{
 			ID: "fixture-webview", Version: "1", ReferenceDPI: 72,
 			Renderer:    SVGRenderer{Path: renderer, Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}},
@@ -73,6 +76,9 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	}
 	if manifest.SchemaVersion != "inkbite.visualpdf.manifest.v3" {
 		t.Fatalf("unexpected visual manifest schema: %q", manifest.SchemaVersion)
+	}
+	if manifest.WOFF2Subsetter == nil || manifest.WOFF2Subsetter.Version != "1.0" || manifest.WOFF2Subsetter.Path != subsetter {
+		t.Fatalf("expected pinned WOFF2 subsetter in manifest, got %#v", manifest.WOFF2Subsetter)
 	}
 	if len(manifest.Pages) != 1 || manifest.Pages[0].State != PageVerifiedSVG {
 		t.Fatalf("expected one verified SVG page, got %#v", manifest.Pages)
@@ -330,6 +336,18 @@ func TestTrueTypeEmbeddingPolicyFailureRejectsUnembeddableFonts(t *testing.T) {
 				t.Fatalf("trueTypeEmbeddingPolicyFailure() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestPinnedWOFF2SubsetterFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	tool := filepath.Join(root, "woff2-subsetter")
+	writeTool(t, root, "woff2-subsetter", `if [ "$1" = "--version" ]; then echo "woff2-subsetter 1.0"; exit 0; fi`)
+	if _, err := resolveWOFF2Subsetter(context.Background(), &WOFF2Subsetter{Path: tool, Version: "2.0"}); err == nil {
+		t.Fatal("expected WOFF2 subsetter version mismatch")
+	}
+	if _, err := resolveWOFF2Subsetter(context.Background(), &WOFF2Subsetter{Path: tool, Version: "1.0"}); err != nil {
+		t.Fatalf("expected pinned WOFF2 subsetter: %v", err)
 	}
 }
 
