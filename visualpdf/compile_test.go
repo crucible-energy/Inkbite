@@ -56,6 +56,9 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	input := filepath.Join(root, "source.pdf")
 	writeValidPDF(t, input)
 	output := filepath.Join(root, "package")
+	if err := os.Mkdir(output, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	subsetter := filepath.Join(root, "woff2-subsetter")
 	writeTool(t, root, "woff2-subsetter", `if [ "$1" = "--version" ]; then echo "woff2-subsetter 1.0"; exit 0; fi; exit 1`)
 	manifest, err := Compile(context.Background(), CompileOptions{
@@ -105,6 +108,44 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	}
 	if len(manifest.RemediationQueue) != 0 {
 		t.Fatalf("expected no remediation items, got %#v", manifest.RemediationQueue)
+	}
+}
+
+func TestCompileFailureLeavesExistingOutputUntouched(t *testing.T) {
+	root := t.TempDir()
+	fixturePNG := filepath.Join(root, "fixture.png")
+	writeFixturePNG(t, fixturePNG)
+	t.Setenv("FAKE_PNG", fixturePNG)
+	tools := filepath.Join(root, "tools")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTool(t, tools, "pdfinfo", `if [ "$1" = "-v" ]; then echo "pdfinfo version 1.2.3"; elif [ "$1" = "-f" ]; then echo "Page size: 72 x 72 pts"; else echo "Pages: 1"; fi`)
+	writeTool(t, tools, "pdftotext", `if [ "$1" = "-v" ]; then echo "pdftotext version 1.2.3"; elif echo " $* " | grep -q " -bbox "; then echo '<doc/>'; else echo 'Source'; fi`)
+	writeTool(t, tools, "pdftocairo", `if [ "$1" = "-v" ]; then echo "pdftocairo version 1.2.3"; exit 0; fi; case " $* " in *" -svg "*) exit 1;; esac; for value in "$@"; do last="$value"; done; cp "$FAKE_PNG" "${last}.png"`)
+	input := filepath.Join(root, "source.pdf")
+	writeValidPDF(t, input)
+	output := filepath.Join(root, "package")
+	if err := os.Mkdir(output, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Compile(context.Background(), CompileOptions{
+		InputPath: input, OutputDirectory: output, Toolchain: Toolchain{Directory: tools, Version: "1.2.3"},
+		Profiles: []VisualProfile{{ID: "fixture", Version: "1", ReferenceDPI: 72, Renderer: SVGRenderer{Path: filepath.Join(root, "renderer"), Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}}, Calibration: fixtureCalibration(t, root)}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "emit Poppler/Cairo") {
+		t.Fatalf("expected outlined SVG failure, got %v", err)
+	}
+	entries, err := os.ReadDir(output)
+	if err != nil {
+		t.Fatalf("existing output directory was removed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("existing output directory contains partial package files: %#v", entries)
+	}
+	staging, err := filepath.Glob(filepath.Join(root, ".package.tmp-*"))
+	if err != nil || len(staging) != 0 {
+		t.Fatalf("staging directories remain after failure: %v, %v", staging, err)
 	}
 }
 
@@ -293,6 +334,26 @@ func TestLoadProfileSetPinsCalibrationEvidence(t *testing.T) {
 	}
 	if _, err := LoadProfileSet(profilePath); err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("expected escaped calibration report rejection, got %v", err)
+	}
+	profileSet.Profiles[0].Calibration.Report = "calibration.md"
+	data, err = json.Marshal(profileSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["unexpected"] = json.RawMessage(`true`)
+	data, err = json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profilePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProfileSet(profilePath); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("expected unknown profile field rejection, got %v", err)
 	}
 }
 

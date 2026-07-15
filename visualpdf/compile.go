@@ -45,8 +45,13 @@ func LoadProfileSet(path string) (ProfileSet, error) {
 		return ProfileSet{}, fmt.Errorf("read visual profile set: %w", err)
 	}
 	var profiles ProfileSet
-	if err := json.Unmarshal(data, &profiles); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&profiles); err != nil {
 		return ProfileSet{}, fmt.Errorf("decode visual profile set: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return ProfileSet{}, errors.New("decode visual profile set: trailing JSON")
 	}
 	if profiles.SchemaVersion != ProfileSetSchemaVersion {
 		return ProfileSet{}, fmt.Errorf("unsupported visual profile schema %q", profiles.SchemaVersion)
@@ -99,21 +104,22 @@ func Compile(ctx context.Context, options CompileOptions) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, fmt.Errorf("resolve output directory: %w", err)
 	}
-	if err := createEmptyOutputDirectory(output); err != nil {
+	staging, err := createStagingOutputDirectory(output)
+	if err != nil {
 		return Manifest{}, err
 	}
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.RemoveAll(output)
+			_ = os.RemoveAll(staging)
 		}
 	}()
 
-	sourcePath := filepath.Join(output, "source.pdf")
+	sourcePath := filepath.Join(staging, "source.pdf")
 	if err := copyFile(input, sourcePath); err != nil {
 		return Manifest{}, fmt.Errorf("retain source PDF: %w", err)
 	}
-	sourceArtifact, err := artifactFor(output, sourcePath, "application/pdf")
+	sourceArtifact, err := artifactFor(staging, sourcePath, "application/pdf")
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -143,7 +149,7 @@ func Compile(ctx context.Context, options CompileOptions) (Manifest, error) {
 	}
 
 	for page := 1; page <= pageCount; page++ {
-		pageManifest, remediation, err := compilePage(ctx, output, sourcePath, sourceDocument, tools, options.Profiles, woff2Subsetter != nil, page, pageDimensions[page-1])
+		pageManifest, remediation, err := compilePage(ctx, staging, sourcePath, sourceDocument, tools, options.Profiles, woff2Subsetter != nil, page, pageDimensions[page-1])
 		if err != nil {
 			return Manifest{}, fmt.Errorf("compile page %d: %w", page, err)
 		}
@@ -160,8 +166,11 @@ func Compile(ctx context.Context, options CompileOptions) (Manifest, error) {
 		}
 		return manifest.RemediationQueue[i].FailedProfile < manifest.RemediationQueue[j].FailedProfile
 	})
-	if err := writeJSON(filepath.Join(output, "manifest.json"), manifest); err != nil {
+	if err := writeJSON(filepath.Join(staging, "manifest.json"), manifest); err != nil {
 		return Manifest{}, fmt.Errorf("write visual manifest: %w", err)
+	}
+	if err := publishOutputDirectory(staging, output); err != nil {
+		return Manifest{}, err
 	}
 	cleanup = false
 	return manifest, nil
@@ -362,23 +371,61 @@ func resolveWOFF2Subsetter(ctx context.Context, configured *WOFF2Subsetter) (*WO
 	return &WOFF2Subsetter{Path: path, Version: configured.Version}, nil
 }
 
-func createEmptyOutputDirectory(output string) error {
-	if info, err := os.Stat(output); err == nil {
+func createStagingOutputDirectory(output string) (string, error) {
+	if info, err := os.Lstat(output); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("visual PDF output must not be a symlink: %s", output)
+		}
 		if !info.IsDir() {
-			return fmt.Errorf("visual PDF output exists and is not a directory: %s", output)
+			return "", fmt.Errorf("visual PDF output exists and is not a directory: %s", output)
 		}
 		entries, readErr := os.ReadDir(output)
 		if readErr != nil {
-			return fmt.Errorf("inspect visual PDF output: %w", readErr)
+			return "", fmt.Errorf("inspect visual PDF output: %w", readErr)
 		}
 		if len(entries) != 0 {
-			return fmt.Errorf("visual PDF output directory must be empty: %s", output)
+			return "", fmt.Errorf("visual PDF output directory must be empty: %s", output)
 		}
-		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect visual PDF output: %w", err)
+		return "", fmt.Errorf("inspect visual PDF output: %w", err)
 	}
-	return os.MkdirAll(output, 0o755)
+	parent := filepath.Dir(output)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", fmt.Errorf("create visual PDF output parent: %w", err)
+	}
+	staging, err := os.MkdirTemp(parent, "."+filepath.Base(output)+".tmp-")
+	if err != nil {
+		return "", fmt.Errorf("create visual PDF staging directory: %w", err)
+	}
+	if err := os.Chmod(staging, 0o755); err != nil {
+		_ = os.RemoveAll(staging)
+		return "", fmt.Errorf("set visual PDF staging directory permissions: %w", err)
+	}
+	return staging, nil
+}
+
+func publishOutputDirectory(staging, output string) error {
+	if info, err := os.Lstat(output); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("visual PDF output changed before publish: %s", output)
+		}
+		entries, readErr := os.ReadDir(output)
+		if readErr != nil {
+			return fmt.Errorf("inspect visual PDF output before publish: %w", readErr)
+		}
+		if len(entries) != 0 {
+			return fmt.Errorf("visual PDF output changed before publish: %s", output)
+		}
+		if err := os.Remove(output); err != nil {
+			return fmt.Errorf("replace visual PDF output: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect visual PDF output before publish: %w", err)
+	}
+	if err := os.Rename(staging, output); err != nil {
+		return fmt.Errorf("publish visual PDF output: %w", err)
+	}
+	return nil
 }
 
 func pageCount(ctx context.Context, pdfinfo, input string) (int, error) {
