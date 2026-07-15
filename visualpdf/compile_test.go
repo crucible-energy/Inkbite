@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -25,6 +26,11 @@ func TestCompileEmitsVerifiedPackageWithSourceText(t *testing.T) {
 	if err := os.MkdirAll(tools, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	fixtureData, err := os.ReadFile(fixturePNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_PNG_BASE64", base64.StdEncoding.EncodeToString(fixtureData))
 	writeTool(t, tools, "pdfinfo", `
 if [ "$1" = "-v" ]; then echo "pdfinfo version 1.2.3"; exit 0; fi
 case " $* " in *" -f "*) echo "Page size: 72 x 72 pts";; *) echo "Pages: 1";; esac
@@ -37,7 +43,7 @@ case " $* " in *" -bbox "*) echo '<?xml version="1.0"?><doc><word xMin="1" yMin=
 if [ "$1" = "-v" ]; then echo "pdftocairo version 1.2.3"; exit 0; fi
 last=""
 for value in "$@"; do last="$value"; done
-case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>' > "$last";; *) cp "$FAKE_PNG" "${last}.png";; esac
+case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/><image href="data:image/png;base64,%s"/></svg>' "$FAKE_PNG_BASE64" > "$last";; *) cp "$FAKE_PNG" "${last}.png";; esac
 `)
 	renderer := filepath.Join(root, "renderer")
 	if err := os.WriteFile(renderer, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'renderer 9'; exit 0; fi\ncp \"$FAKE_PNG\" \"$4\"\n"), 0o755); err != nil {
@@ -69,6 +75,10 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	}
 	if manifest.Pages[0].PrimaryDisplay == nil || manifest.Pages[0].PrimaryDisplay.MediaType != "image/svg+xml" {
 		t.Fatalf("expected SVG primary display, got %#v", manifest.Pages[0].PrimaryDisplay)
+	}
+	outlined := manifest.Pages[0].Candidates[0]
+	if len(outlined.ReferencedAssets) != 1 || outlined.InstalledByteCount != outlined.SVG.ByteCount+outlined.ReferencedAssets[0].ByteCount {
+		t.Fatalf("expected one installed SVG image asset, got %#v", outlined)
 	}
 	if manifest.Pages[0].Candidates[1].State != CandidateUnavailable {
 		t.Fatalf("expected font-policy source-aware candidate to remain unavailable, got %#v", manifest.Pages[0].Candidates[1])
@@ -146,6 +156,48 @@ func TestValidateSVGRejectsResponsiveImageMetadata(t *testing.T) {
 	}
 	if err := validateSVG(svg); err == nil || !strings.Contains(err.Error(), "responsive-image") {
 		t.Fatalf("expected responsive image metadata rejection, got %v", err)
+	}
+}
+
+func TestExternalizeSVGImageAssetsPreservesBytesAndPlacement(t *testing.T) {
+	output := t.TempDir()
+	svgPath := filepath.Join(output, "pages", "0001", "outlined-glyph.svg")
+	if err := os.MkdirAll(filepath.Dir(svgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(output, "fixture.png")
+	writeFixturePNG(t, fixture)
+	pngBytes, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inline := base64.StdEncoding.EncodeToString(pngBytes)
+	if err := os.WriteFile(svgPath, []byte(`<svg><image x="12" y="34" width="56" height="78" href="data:image/png;base64,`+inline+`"/></svg>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assets, err := externalizeSVGImageAssets(output, svgPath, filepath.Join(filepath.Dir(svgPath), "outlined-assets"))
+	if err != nil {
+		t.Fatalf("externalizeSVGImageAssets() error = %v", err)
+	}
+	if len(assets) != 1 || assets[0].MediaType != "image/png" {
+		t.Fatalf("unexpected assets: %#v", assets)
+	}
+	rewritten, err := os.ReadFile(svgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rewritten), "data:image") || !strings.Contains(string(rewritten), `x="12" y="34" width="56" height="78" href="outlined-assets/a1.png"`) {
+		t.Fatalf("unexpected rewritten SVG: %s", rewritten)
+	}
+	sidecar, err := os.ReadFile(filepath.Join(output, filepath.FromSlash(assets[0].Locator)))
+	if err != nil || !bytes.Equal(sidecar, pngBytes) {
+		t.Fatalf("externalized asset does not preserve image bytes: %v", err)
+	}
+	if err := validateSVGWithAssets(svgPath, output, assets); err != nil {
+		t.Fatalf("validateSVGWithAssets() error = %v", err)
+	}
+	if err := validateSVG(svgPath); err == nil || !strings.Contains(err.Error(), "external resource") {
+		t.Fatalf("expected undeclared local SVG asset rejection, got %v", err)
 	}
 }
 

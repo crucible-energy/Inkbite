@@ -210,7 +210,10 @@ No OCR is substituted for PDF-source text. Painted PDF raster XObjects are
 also retained in integrity-hashed page sidecars: supported JPEG streams keep
 their original bytes, while supported Flate, CCITT, and raw streams become
 lossless PNGs. Transparency masks remain separate sidecars; they are not
-flattened into the image or silently treated as a display asset.
+flattened into the image. Separately, PNG and JPEG image data embedded by the
+outlined SVG are written byte-for-byte as declared package-local candidate
+assets while preserving the SVG image placement. The rewritten candidate must
+pass the same visual gate before it can become the display asset.
 
 ```bash
 inkbite visual pdf \

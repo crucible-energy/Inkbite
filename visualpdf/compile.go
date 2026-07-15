@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -31,6 +32,7 @@ var (
 	pageSizePattern = regexp.MustCompile(`(?m)^Page size:\s+([0-9.]+) x ([0-9.]+) pts`)
 	svgResourceRef  = regexp.MustCompile(`(?i)(?:xlink:)?(?:href|src)\s*=\s*["']\s*([^"']*)["']`)
 	svgURLRef       = regexp.MustCompile(`(?i)url\(\s*["']?\s*([^"'\)\s]+)`)
+	svgImageDataURI = regexp.MustCompile(`(?is)(<image\b[^>]*?\b(?:(?:xlink:)?href|src)\s*=\s*["'])data:([^"']+)(["'])`)
 )
 
 // LoadProfileSet loads an explicitly versioned profile file. JSON is used so
@@ -569,11 +571,22 @@ func emitOutlinedCandidate(ctx context.Context, pdftocairo, input, output string
 	if err := validateSVG(svgPath); err != nil {
 		return Candidate{}, fmt.Errorf("unsafe or unsupported Poppler SVG: %w", err)
 	}
+	referencedAssets, err := externalizeSVGImageAssets(output, svgPath, filepath.Join(pageDirectory, "outlined-assets"))
+	if err != nil {
+		return Candidate{}, fmt.Errorf("externalize Poppler SVG image assets: %w", err)
+	}
+	if err := validateSVGWithAssets(svgPath, output, referencedAssets); err != nil {
+		return Candidate{}, fmt.Errorf("unsafe or unsupported rewritten Poppler SVG: %w", err)
+	}
 	artifact, err := artifactFor(output, svgPath, "image/svg+xml")
 	if err != nil {
 		return Candidate{}, err
 	}
-	candidate := Candidate{Kind: "outlined_glyph", State: CandidateVerified, SVG: &artifact, ReferencedAssets: []Artifact{}, InstalledByteCount: artifact.ByteCount, Verification: make([]Verification, 0, len(profiles))}
+	installedBytes := artifact.ByteCount
+	for _, asset := range referencedAssets {
+		installedBytes += asset.ByteCount
+	}
+	candidate := Candidate{Kind: "outlined_glyph", State: CandidateVerified, SVG: &artifact, ReferencedAssets: referencedAssets, InstalledByteCount: installedBytes, Verification: make([]Verification, 0, len(profiles))}
 	for index, profile := range profiles {
 		verification := references[index]
 		renderedPath := filepath.Join(pageDirectory, "rendered-"+safeName(profile.ID)+".png")
@@ -750,6 +763,23 @@ func inspectPNG(path string) (image.Config, error) {
 }
 
 func validateSVG(path string) error {
+	return validateSVGReferences(path, nil)
+}
+
+func validateSVGWithAssets(path, output string, assets []Artifact) error {
+	allowed := make(map[string]struct{}, len(assets))
+	for _, asset := range assets {
+		assetPath := filepath.Join(output, filepath.FromSlash(asset.Locator))
+		reference, err := filepath.Rel(filepath.Dir(path), assetPath)
+		if err != nil || reference == ".." || strings.HasPrefix(reference, ".."+string(filepath.Separator)) {
+			return errors.New("SVG asset is outside the SVG directory")
+		}
+		allowed[filepath.ToSlash(reference)] = struct{}{}
+	}
+	return validateSVGReferences(path, allowed)
+}
+
+func validateSVGReferences(path string, localAssets map[string]struct{}) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -762,12 +792,12 @@ func validateSVG(path string) error {
 		return errors.New("SVG contains unsupported responsive-image metadata")
 	}
 	for _, match := range svgResourceRef.FindAllStringSubmatch(lower, -1) {
-		if !safeSVGResourceReference(match[1]) {
+		if !safeSVGResourceReference(match[1], localAssets) {
 			return errors.New("SVG contains an unsafe external resource reference")
 		}
 	}
 	for _, match := range svgURLRef.FindAllStringSubmatch(lower, -1) {
-		if !safeSVGResourceReference(match[1]) {
+		if !safeSVGResourceReference(match[1], localAssets) {
 			return errors.New("SVG contains an unsafe CSS resource reference")
 		}
 	}
@@ -779,9 +809,100 @@ func validateSVG(path string) error {
 	return nil
 }
 
-func safeSVGResourceReference(value string) bool {
+func safeSVGResourceReference(value string, localAssets map[string]struct{}) bool {
 	value = strings.TrimSpace(strings.ToLower(value))
-	return strings.HasPrefix(value, "#") || strings.HasPrefix(value, "data:")
+	if strings.HasPrefix(value, "#") || strings.HasPrefix(value, "data:") {
+		return true
+	}
+	_, allowed := localAssets[value]
+	return allowed
+}
+
+func externalizeSVGImageAssets(output, svgPath, assetDirectory string) ([]Artifact, error) {
+	svg, err := os.ReadFile(svgPath)
+	if err != nil {
+		return nil, err
+	}
+	matches := svgImageDataURI.FindAllSubmatchIndex(svg, -1)
+	if len(matches) == 0 {
+		return []Artifact{}, nil
+	}
+	if err := os.MkdirAll(assetDirectory, 0o755); err != nil {
+		return nil, err
+	}
+	byContent := make(map[string]string, len(matches))
+	assets := make([]Artifact, 0, len(matches))
+	var rewritten bytes.Buffer
+	position := 0
+	for _, match := range matches {
+		dataURI := string(svg[match[4]:match[5]])
+		mediaType, data, err := decodeSVGImageDataURI(dataURI)
+		if err != nil {
+			return nil, err
+		}
+		digest := sha256.Sum256(data)
+		key := mediaType + ":" + hex.EncodeToString(digest[:])
+		reference, exists := byContent[key]
+		if !exists {
+			extension, err := assetExtension(mediaType)
+			if err != nil {
+				return nil, err
+			}
+			name := fmt.Sprintf("a%d%s", len(assets)+1, extension)
+			path := filepath.Join(assetDirectory, name)
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				return nil, err
+			}
+			artifact, err := artifactFor(output, path, mediaType)
+			if err != nil {
+				return nil, err
+			}
+			reference, err = filepath.Rel(filepath.Dir(svgPath), path)
+			if err != nil || reference == ".." || strings.HasPrefix(reference, ".."+string(filepath.Separator)) {
+				return nil, errors.New("externalized SVG image asset is outside the SVG directory")
+			}
+			reference = filepath.ToSlash(reference)
+			byContent[key] = reference
+			assets = append(assets, artifact)
+		}
+		rewritten.Write(svg[position:match[3]])
+		rewritten.WriteString(reference)
+		rewritten.Write(svg[match[6]:match[7]])
+		position = match[1]
+	}
+	rewritten.Write(svg[position:])
+	if err := os.WriteFile(svgPath, rewritten.Bytes(), 0o644); err != nil {
+		return nil, err
+	}
+	return assets, nil
+}
+
+func decodeSVGImageDataURI(value string) (string, []byte, error) {
+	metadata, encoded, found := strings.Cut(value, ",")
+	if !found {
+		return "", nil, errors.New("SVG image data URI is missing a payload")
+	}
+	parts := strings.Split(metadata, ";")
+	if len(parts) != 2 || !strings.EqualFold(strings.TrimSpace(parts[1]), "base64") {
+		return "", nil, errors.New("SVG image data URI must use a single base64 encoding marker")
+	}
+	mediaType := strings.ToLower(strings.TrimSpace(parts[0]))
+	if mediaType != "image/jpeg" && mediaType != "image/png" {
+		return "", nil, fmt.Errorf("unsupported SVG image data URI media type %q", mediaType)
+	}
+	encoded = strings.ReplaceAll(strings.ReplaceAll(encoded, "\n", ""), "\r", "")
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", nil, fmt.Errorf("decode SVG image data URI: %w", err)
+	}
+	_, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return "", nil, fmt.Errorf("decode SVG image data URI image: %w", err)
+	}
+	if (mediaType == "image/jpeg" && format != "jpeg") || (mediaType == "image/png" && format != "png") {
+		return "", nil, fmt.Errorf("SVG image data URI media type %q does not match decoded %s", mediaType, format)
+	}
+	return mediaType, data, nil
 }
 
 func parseTextRuns(data []byte) ([]TextRun, error) {
