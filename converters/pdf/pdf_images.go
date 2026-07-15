@@ -62,50 +62,39 @@ func ExtractPageRasterAssets(document []byte, pageNumber int) ([]RasterAsset, er
 }
 
 func pageRasterAssets(page pdf.Page) ([]RasterAsset, error) {
-	placements, err := referencedXObjectPlacements(page)
+	painted, err := paintedImageXObjects(page)
 	if err != nil {
 		return nil, err
 	}
-	if len(placements) == 0 {
+	if len(painted) == 0 {
 		return []RasterAsset{}, nil
 	}
-	xobjects := page.Resources().Key("XObject")
-	names := xobjects.Keys()
-	sort.Strings(names)
-	assets := make([]RasterAsset, 0, len(placements))
-	for _, name := range names {
-		painted, ok := placements[name]
-		if !ok {
-			continue
-		}
-		xobject := xobjects.Key(name)
-		if xobject.IsNull() || xobject.Key("Subtype").Name() != "Image" {
-			continue
-		}
-		data, mediaType, encoding, err := sourceRasterAssetData(xobject)
+	assets := make([]RasterAsset, 0, len(painted))
+	for _, image := range painted {
+		data, mediaType, encoding, err := sourceRasterAssetData(image.xobject)
 		if err != nil {
-			return nil, fmt.Errorf("image XObject %s: %w", name, err)
+			return nil, fmt.Errorf("image XObject %s: %w", image.name, err)
 		}
 		assets = append(assets, RasterAsset{
-			Name: name, Role: "image", Placements: painted, MediaType: mediaType, Encoding: encoding, Bytes: data,
+			Name: image.name, Role: "image", Placements: image.placements, MediaType: mediaType, Encoding: encoding, Bytes: data,
 		})
 		for _, key := range []string{"Mask", "SMask"} {
-			mask := xobject.Key(key)
+			mask := image.xobject.Key(key)
 			if mask.IsNull() {
 				continue
 			}
 			if mask.Kind() != pdf.Stream {
-				return nil, fmt.Errorf("image XObject %s has unsupported %s form", name, key)
+				return nil, fmt.Errorf("image XObject %s has unsupported %s form", image.name, key)
 			}
 			maskData, maskMediaType, maskEncoding, maskErr := sourceRasterAssetData(mask)
 			if maskErr != nil {
-				return nil, fmt.Errorf("image XObject %s %s: %w", name, key, maskErr)
+				return nil, fmt.Errorf("image XObject %s %s: %w", image.name, key, maskErr)
 			}
 			assets = append(assets, RasterAsset{
-				Name:       name + "-" + strings.ToLower(key),
+				Name:       image.name + "-" + strings.ToLower(key),
 				Role:       "mask",
-				MaskFor:    name,
-				Placements: painted,
+				MaskFor:    image.name,
+				Placements: image.placements,
 				MediaType:  maskMediaType,
 				Encoding:   maskEncoding,
 				Bytes:      maskData,
@@ -115,18 +104,51 @@ func pageRasterAssets(page pdf.Page) ([]RasterAsset, error) {
 	return assets, nil
 }
 
-func referencedXObjectPlacements(page pdf.Page) (placements map[string][]RasterPlacement, err error) {
-	placements = make(map[string][]RasterPlacement)
-	current := identityRasterPlacement()
+const maxFormXObjectDepth = 32
+
+type paintedImageXObject struct {
+	name       string
+	xobject    pdf.Value
+	placements []RasterPlacement
+}
+
+type rasterPlacementExtractor struct {
+	images map[string]*paintedImageXObject
+}
+
+func paintedImageXObjects(page pdf.Page) ([]paintedImageXObject, error) {
+	extractor := rasterPlacementExtractor{images: make(map[string]*paintedImageXObject)}
+	if err := extractor.extract(page.Resources(), page.V.Key("Contents"), nil, identityRasterPlacement(), 0); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(extractor.images))
+	for name := range extractor.images {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]paintedImageXObject, 0, len(names))
+	for _, name := range names {
+		result = append(result, *extractor.images[name])
+	}
+	return result, nil
+}
+
+func (extractor *rasterPlacementExtractor) extract(resources, contents pdf.Value, path []string, initial RasterPlacement, depth int) (err error) {
+	if depth > maxFormXObjectDepth {
+		return fmt.Errorf("Form XObject nesting exceeds %d", maxFormXObjectDepth)
+	}
+	if resources.Kind() != pdf.Dict {
+		return fmt.Errorf("XObject resources are missing or malformed")
+	}
+	current := initial
 	var stack []RasterPlacement
 
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			placements = nil
 			err = fmt.Errorf("interpret page graphics state: %v", recovered)
 		}
 	}()
-	if err = interpretContentStreams(page.V.Key("Contents"), func(stream pdf.Value) {
+	if err = interpretContentStreams(contents, func(stream pdf.Value) {
 		pdf.Interpret(stream, func(values *pdf.Stack, operator string) {
 			if err != nil {
 				return
@@ -163,16 +185,57 @@ func referencedXObjectPlacements(page pdf.Page) (placements map[string][]RasterP
 					return
 				}
 				name := arguments[0].Name()
-				placements[name] = append(placements[name], current)
+				xobject := resources.Key("XObject").Key(name)
+				if xobject.IsNull() {
+					err = fmt.Errorf("painted XObject %s is missing from resources", name)
+					return
+				}
+				qualifiedName := strings.Join(append(append([]string{}, path...), name), "/")
+				switch xobject.Key("Subtype").Name() {
+				case "Image":
+					if image, ok := extractor.images[qualifiedName]; ok {
+						image.placements = append(image.placements, current)
+					} else {
+						extractor.images[qualifiedName] = &paintedImageXObject{
+							name: qualifiedName, xobject: xobject, placements: []RasterPlacement{current},
+						}
+					}
+				case "Form":
+					matrix, matrixErr := formXObjectMatrix(xobject)
+					if matrixErr != nil {
+						err = fmt.Errorf("Form XObject %s: %w", qualifiedName, matrixErr)
+						return
+					}
+					if formErr := extractor.extract(xobject.Key("Resources"), xobject, append(path, name), composeRasterPlacements(matrix, current), depth+1); formErr != nil {
+						err = formErr
+					}
+				default:
+					err = fmt.Errorf("painted XObject %s has unsupported subtype %q", qualifiedName, xobject.Key("Subtype").Name())
+				}
 			}
 		})
 	}); err != nil {
-		return nil, err
+		return err
 	}
 	if len(stack) != 0 {
-		return nil, fmt.Errorf("unbalanced q graphics-state save")
+		return fmt.Errorf("unbalanced q graphics-state save")
 	}
-	return placements, nil
+	return nil
+}
+
+func formXObjectMatrix(xobject pdf.Value) (RasterPlacement, error) {
+	matrix := xobject.Key("Matrix")
+	if matrix.IsNull() {
+		return identityRasterPlacement(), nil
+	}
+	if matrix.Kind() != pdf.Array {
+		return RasterPlacement{}, fmt.Errorf("Matrix is not an array")
+	}
+	arguments := make([]pdf.Value, matrix.Len())
+	for index := range arguments {
+		arguments[index] = matrix.Index(index)
+	}
+	return rasterPlacementMatrix(arguments)
 }
 
 func interpretContentStreams(contents pdf.Value, interpret func(pdf.Value)) error {

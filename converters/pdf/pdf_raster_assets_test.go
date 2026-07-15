@@ -71,6 +71,17 @@ func TestExtractPageRasterAssetsCarriesPlacementAcrossContentStreams(t *testing.
 	}
 }
 
+func TestExtractPageRasterAssetsFollowsPaintedFormXObjects(t *testing.T) {
+	assets, err := ExtractPageRasterAssets(makeFormImagePDF(1, 1, []byte{0x00}), 1)
+	if err != nil {
+		t.Fatalf("ExtractPageRasterAssets() error = %v", err)
+	}
+	want := RasterPlacement{Matrix: [6]float64{6, 0, 0, 4, 20, 20}}
+	if len(assets) != 1 || assets[0].Name != "Fm1/Im1" || len(assets[0].Placements) != 1 || assets[0].Placements[0] != want {
+		t.Fatalf("unexpected Form XObject asset: %#v", assets)
+	}
+}
+
 func TestExtractPageRasterAssetsKeepsSoftMaskSeparate(t *testing.T) {
 	document := bytes.Replace(makeMaskedJPEGImagePDF(), []byte("/Mask 6 0 R"), []byte("/SMask 6 0 R"), 1)
 	assets, err := ExtractPageRasterAssets(document, 1)

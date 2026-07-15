@@ -393,6 +393,21 @@ func makeGrayImagePDFWithArrayContents(width, height int, pixels []byte) []byte 
 	return makeBinaryPDF(objects)
 }
 
+func makeFormImagePDF(width, height int, pixels []byte) []byte {
+	pageContent := []byte("q\n2 0 0 1 0 0 cm\n/Fm1 Do\nQ")
+	formContent := []byte("q\n3 0 0 4 0 0 cm\n/Im1 Do\nQ")
+	form := []byte(fmt.Sprintf("<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] /Matrix [1 0 0 1 10 20] /Resources << /XObject << /Im1 6 0 R >> >> /Length %d >>\nstream\n%s\nendstream", len(formContent), formContent))
+	objects := [][]byte{
+		[]byte("<< /Type /Catalog /Pages 2 0 R >>"),
+		[]byte("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+		[]byte("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /XObject << /Fm1 5 0 R >> >> >>"),
+		[]byte(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(pageContent), pageContent)),
+		form,
+		makeGrayImageXObject(width, height, pixels),
+	}
+	return makeBinaryPDF(objects)
+}
+
 func makeGrayImagePDFWithUnusedResource() []byte {
 	content := []byte("q\n2 0 0 1 0 0 cm\n/Im1 Do\nQ")
 
