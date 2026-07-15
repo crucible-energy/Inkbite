@@ -206,7 +206,11 @@ only when the profile renderer passes its committed visual gate; otherwise a
 verified reference `raster_fallback` is emitted with a deterministic
 remediation item. The source-aware text candidate remains unavailable unless a
 source font program, glyph mapping, and approved embedding policy are present.
-No OCR is substituted for PDF-source text.
+No OCR is substituted for PDF-source text. Painted PDF raster XObjects are
+also retained in integrity-hashed page sidecars: supported JPEG streams keep
+their original bytes, while supported Flate, CCITT, and raw streams become
+lossless PNGs. Transparency masks remain separate sidecars; they are not
+flattened into the image or silently treated as a display asset.
 
 ```bash
 inkbite visual pdf \

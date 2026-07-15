@@ -10,12 +10,141 @@ import (
 	"image/png"
 	"io"
 	"regexp"
+	"sort"
+	"strings"
 
 	"github.com/dslipak/pdf"
 	"golang.org/x/image/ccitt"
 )
 
 var doOperatorPattern = regexp.MustCompile(`/([^\s<>\[\]\(\)%/]+)\s+Do\b`)
+
+// RasterAsset is a PDF page image or transparency mask preserved for visual
+// packaging. Original JPEG bytes are retained exactly; other supported PDF
+// raster encodings become lossless PNG only after their decoded pixels are
+// verified locally.
+type RasterAsset struct {
+	Name      string
+	Role      string
+	MaskFor   string
+	MediaType string
+	Encoding  string
+	Bytes     []byte
+}
+
+// ExtractPageRasterAssets returns only image XObjects painted by one PDF page.
+// It never flattens a mask into its image: /Mask and /SMask streams are emitted
+// as separate assets. Unsupported image encodings or mask forms fail closed.
+func ExtractPageRasterAssets(document []byte, pageNumber int) ([]RasterAsset, error) {
+	if pageNumber <= 0 {
+		return nil, fmt.Errorf("PDF page number must be positive")
+	}
+	reader, err := pdf.NewReader(bytes.NewReader(document), int64(len(document)))
+	if err != nil {
+		return nil, err
+	}
+	if pageNumber > reader.NumPage() {
+		return nil, fmt.Errorf("PDF page %d is unavailable", pageNumber)
+	}
+	page := reader.Page(pageNumber)
+	if page.V.IsNull() {
+		return nil, fmt.Errorf("PDF page %d is null", pageNumber)
+	}
+	return pageRasterAssets(page)
+}
+
+func pageRasterAssets(page pdf.Page) ([]RasterAsset, error) {
+	referenced, err := referencedXObjectNames(page)
+	if err != nil {
+		return nil, err
+	}
+	if len(referenced) == 0 {
+		return []RasterAsset{}, nil
+	}
+	xobjects := page.Resources().Key("XObject")
+	names := xobjects.Keys()
+	sort.Strings(names)
+	assets := make([]RasterAsset, 0, len(referenced))
+	for _, name := range names {
+		if _, ok := referenced[name]; !ok {
+			continue
+		}
+		xobject := xobjects.Key(name)
+		if xobject.IsNull() || xobject.Key("Subtype").Name() != "Image" {
+			continue
+		}
+		data, mediaType, encoding, err := sourceRasterAssetData(xobject)
+		if err != nil {
+			return nil, fmt.Errorf("image XObject %s: %w", name, err)
+		}
+		assets = append(assets, RasterAsset{Name: name, Role: "image", MediaType: mediaType, Encoding: encoding, Bytes: data})
+		for _, key := range []string{"Mask", "SMask"} {
+			mask := xobject.Key(key)
+			if mask.IsNull() {
+				continue
+			}
+			if mask.Kind() != pdf.Stream {
+				return nil, fmt.Errorf("image XObject %s has unsupported %s form", name, key)
+			}
+			maskData, maskMediaType, maskEncoding, maskErr := sourceRasterAssetData(mask)
+			if maskErr != nil {
+				return nil, fmt.Errorf("image XObject %s %s: %w", name, key, maskErr)
+			}
+			assets = append(assets, RasterAsset{
+				Name:      name + "-" + strings.ToLower(key),
+				Role:      "mask",
+				MaskFor:   name,
+				MediaType: maskMediaType,
+				Encoding:  maskEncoding,
+				Bytes:     maskData,
+			})
+		}
+	}
+	return assets, nil
+}
+
+func sourceRasterAssetData(xobject pdf.Value) ([]byte, string, string, error) {
+	width, height, bitsPerComponent, err := imageGeometry(xobject)
+	if err != nil {
+		return nil, "", "", err
+	}
+	filter := terminalFilterName(xobject.Key("Filter"))
+	switch filter {
+	case "DCTDecode":
+		data, err := readAllStreamBytes(xobject)
+		if err != nil {
+			return nil, "", "", err
+		}
+		if _, err := jpeg.DecodeConfig(bytes.NewReader(data)); err != nil {
+			return nil, "", "", fmt.Errorf("invalid JPEG image stream: %w", err)
+		}
+		return data, "image/jpeg", "original_jpeg", nil
+	case "FlateDecode":
+		raw, err := readAllStreamBytes(xobject)
+		if err != nil {
+			return nil, "", "", err
+		}
+		data, err := rasterSamplesToPNG(raw, xobject.Key("ColorSpace"), width, height, bitsPerComponent)
+		if err != nil {
+			return nil, "", "", err
+		}
+		return data, "image/png", "lossless_png", nil
+	case "CCITTFaxDecode":
+		data, err := ccittImageToPNG(xobject, width, height)
+		if err != nil {
+			return nil, "", "", err
+		}
+		return data, "image/png", "lossless_png", nil
+	case "":
+		data, err := rawMaskToPNG(xobject, width, height, bitsPerComponent)
+		if err != nil {
+			return nil, "", "", err
+		}
+		return data, "image/png", "lossless_png", nil
+	default:
+		return nil, "", "", fmt.Errorf("unsupported PDF image filter %q", filter)
+	}
+}
 
 func extractPageAssets(page pdf.Page, pageNum int) ([]string, error) {
 	referenced, err := referencedXObjectNames(page)

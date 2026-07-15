@@ -1,8 +1,11 @@
 package visualpdf
 
 import (
+	"bytes"
+	"compress/zlib"
 	"context"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -41,9 +44,7 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 		t.Fatal(err)
 	}
 	input := filepath.Join(root, "source.pdf")
-	if err := os.WriteFile(input, []byte("not parsed by fake Poppler"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeValidPDF(t, input)
 	output := filepath.Join(root, "package")
 	manifest, err := Compile(context.Background(), CompileOptions{
 		InputPath:       input,
@@ -101,9 +102,7 @@ func TestCompileUsesVerifiedReferenceAsRasterFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := filepath.Join(root, "source.pdf")
-	if err := os.WriteFile(input, []byte("fixture"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeValidPDF(t, input)
 	manifest, err := Compile(context.Background(), CompileOptions{
 		InputPath: input, OutputDirectory: filepath.Join(root, "package"), Toolchain: Toolchain{Directory: tools, Version: "1.2.3"},
 		Profiles: []VisualProfile{{ID: "fixture", Version: "1", ReferenceDPI: 72, Renderer: SVGRenderer{Path: renderer, Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}}, Calibration: fixtureCalibration(t, root)}},
@@ -207,6 +206,45 @@ func TestCheckedInProfilePinsItsCalibrationReport(t *testing.T) {
 	}
 }
 
+func TestEmitSourceRasterAssetsWritesLosslessSidecars(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "source.pdf")
+	if err := os.WriteFile(input, grayRasterPDF(2, 1, []byte{0x00, 0xFF}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "package")
+	pageDirectory := filepath.Join(output, "pages", "0001")
+	if err := os.MkdirAll(pageDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	document, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets, err := emitSourceRasterAssets(document, output, 1, pageDirectory)
+	if err != nil {
+		t.Fatalf("emitSourceRasterAssets() error = %v", err)
+	}
+	if len(assets) != 1 || assets[0].Encoding != "lossless_png" || assets[0].Artifact.MediaType != "image/png" {
+		t.Fatalf("unexpected source raster assets: %#v", assets)
+	}
+	file, err := os.Open(filepath.Join(output, filepath.FromSlash(assets[0].Artifact.Locator)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	decoded, err := png.Decode(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left, _, _, _ := decoded.At(0, 0).RGBA(); left != 0 {
+		t.Fatalf("first pixel = %d, want 0", left)
+	}
+	if right, _, _, _ := decoded.At(1, 0).RGBA(); right != 0xFFFF {
+		t.Fatalf("second pixel = %d, want 65535", right)
+	}
+}
+
 func fixtureCalibration(t *testing.T, root string) Calibration {
 	t.Helper()
 	path := filepath.Join(root, "calibration.md")
@@ -218,6 +256,55 @@ func fixtureCalibration(t *testing.T, root string) Calibration {
 		t.Fatal(err)
 	}
 	return Calibration{CorpusID: "fixture-corpus", Report: path, ReportSHA256: hash}
+}
+
+func writeValidPDF(t *testing.T, destination string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "converters", "pdf", "testdata", "simple.pdf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func grayRasterPDF(width, height int, pixels []byte) []byte {
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := writer.Write(pixels); err != nil {
+		panic(err)
+	}
+	if err := writer.Close(); err != nil {
+		panic(err)
+	}
+	content := []byte("q\n2 0 0 1 0 0 cm\n/Im1 Do\nQ")
+	image := append([]byte(fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n", width, height, compressed.Len())), compressed.Bytes()...)
+	image = append(image, []byte("\nendstream")...)
+	objects := [][]byte{
+		[]byte("<< /Type /Catalog /Pages 2 0 R >>"),
+		[]byte("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+		[]byte("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>"),
+		[]byte(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content)),
+		image,
+	}
+	var document bytes.Buffer
+	document.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objects)+1)
+	for index, object := range objects {
+		offsets[index+1] = document.Len()
+		fmt.Fprintf(&document, "%d 0 obj\n", index+1)
+		document.Write(object)
+		document.WriteString("\nendobj\n")
+	}
+	xrefOffset := document.Len()
+	fmt.Fprintf(&document, "xref\n0 %d\n", len(objects)+1)
+	document.WriteString("0000000000 65535 f \n")
+	for index := 1; index <= len(objects); index++ {
+		fmt.Fprintf(&document, "%010d 00000 n \n", offsets[index])
+	}
+	fmt.Fprintf(&document, "trailer\n<< /Root 1 0 R /Size %d >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xrefOffset)
+	return document.Bytes()
 }
 
 func writeFixturePNG(t *testing.T, path string) {

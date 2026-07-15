@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	pdfconv "github.com/LynnColeArt/Inkbite/converters/pdf"
 )
 
 var (
@@ -111,12 +113,16 @@ func Compile(ctx context.Context, options CompileOptions) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
+	sourceDocument, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("read source PDF: %w", err)
+	}
 
-	pageCount, err := pageCount(ctx, tools.pdfinfo, input)
+	pageCount, err := pageCount(ctx, tools.pdfinfo, sourcePath)
 	if err != nil {
 		return Manifest{}, err
 	}
-	pageDimensions, err := dimensionsForPages(ctx, tools.pdfinfo, input, pageCount)
+	pageDimensions, err := dimensionsForPages(ctx, tools.pdfinfo, sourcePath, pageCount)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -132,7 +138,7 @@ func Compile(ctx context.Context, options CompileOptions) (Manifest, error) {
 	}
 
 	for page := 1; page <= pageCount; page++ {
-		pageManifest, remediation, err := compilePage(ctx, output, input, tools, options.Profiles, page, pageDimensions[page-1])
+		pageManifest, remediation, err := compilePage(ctx, output, sourcePath, sourceDocument, tools, options.Profiles, page, pageDimensions[page-1])
 		if err != nil {
 			return Manifest{}, fmt.Errorf("compile page %d: %w", page, err)
 		}
@@ -385,6 +391,7 @@ func dimensionsForPages(ctx context.Context, pdfinfo, input string, pages int) (
 func compilePage(
 	ctx context.Context,
 	output, input string,
+	sourceDocument []byte,
 	tools toolPaths,
 	profiles []VisualProfile,
 	page int,
@@ -395,6 +402,10 @@ func compilePage(
 		return PageManifest{}, nil, err
 	}
 	semantic, textRuns, err := emitSemantics(ctx, tools.pdftotext, input, output, page, pageDirectory)
+	if err != nil {
+		return PageManifest{}, nil, err
+	}
+	sourceRasterAssets, err := emitSourceRasterAssets(sourceDocument, output, page, pageDirectory)
 	if err != nil {
 		return PageManifest{}, nil, err
 	}
@@ -416,7 +427,7 @@ func compilePage(
 		}
 	}
 	pageManifest := PageManifest{
-		Page: page, Dimensions: dimensions, SemanticMarkdown: semantic, TextRuns: textRuns,
+		Page: page, Dimensions: dimensions, SemanticMarkdown: semantic, TextRuns: textRuns, SourceRasterAssets: sourceRasterAssets,
 		Candidates: candidates, RemediationState: "none",
 	}
 	if len(verified) > 0 {
@@ -441,6 +452,56 @@ func compilePage(
 	pageManifest.RasterFallback = &fallback
 	pageManifest.RemediationState = "queued"
 	return pageManifest, &RemediationItem{Page: page, CompilerReason: candidateFailureReason(candidates), FailedProfile: firstFailedProfile(candidates)}, nil
+}
+
+func emitSourceRasterAssets(document []byte, output string, page int, pageDirectory string) ([]SourceRasterAsset, error) {
+	assets, err := pdfconv.ExtractPageRasterAssets(document, page)
+	if err != nil {
+		return nil, fmt.Errorf("extract source raster assets: %w", err)
+	}
+	if len(assets) == 0 {
+		return []SourceRasterAsset{}, nil
+	}
+	assetDirectory := filepath.Join(pageDirectory, "source-raster-assets")
+	if err := os.MkdirAll(assetDirectory, 0o755); err != nil {
+		return nil, err
+	}
+	result := make([]SourceRasterAsset, 0, len(assets))
+	usedNames := make(map[string]int, len(assets))
+	for _, asset := range assets {
+		extension, err := assetExtension(asset.MediaType)
+		if err != nil {
+			return nil, err
+		}
+		base := safeName(asset.Name)
+		usedNames[base]++
+		if usedNames[base] > 1 {
+			base = fmt.Sprintf("%s-%d", base, usedNames[base])
+		}
+		path := filepath.Join(assetDirectory, base+extension)
+		if err := os.WriteFile(path, asset.Bytes, 0o644); err != nil {
+			return nil, err
+		}
+		artifact, err := artifactFor(output, path, asset.MediaType)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, SourceRasterAsset{
+			Name: asset.Name, Role: asset.Role, MaskFor: asset.MaskFor, Encoding: asset.Encoding, Artifact: artifact,
+		})
+	}
+	return result, nil
+}
+
+func assetExtension(mediaType string) (string, error) {
+	switch mediaType {
+	case "image/jpeg":
+		return ".jpg", nil
+	case "image/png":
+		return ".png", nil
+	default:
+		return "", fmt.Errorf("unsupported source raster asset media type %q", mediaType)
+	}
 }
 
 func emitSemantics(ctx context.Context, pdftotext, input, output string, page int, pageDirectory string) (Artifact, Artifact, error) {

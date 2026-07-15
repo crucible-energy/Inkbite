@@ -148,18 +148,31 @@ type RemediationItem struct {
 	FailedProfile  string `json:"failed_profile"`
 }
 
+// SourceRasterAsset preserves a painted PDF image XObject or its transparency
+// mask independently from the SVG candidate. These sidecars preserve source
+// JPEG bytes or lossless decoded pixels for fidelity review and future SVG
+// asset placement; they are not a substitute for the verified display asset.
+type SourceRasterAsset struct {
+	Name     string   `json:"name"`
+	Role     string   `json:"role"`
+	MaskFor  string   `json:"mask_for,omitempty"`
+	Encoding string   `json:"encoding"`
+	Artifact Artifact `json:"artifact"`
+}
+
 // PageManifest contains every display, semantic, and visual-verification
 // artifact for a source PDF page.
 type PageManifest struct {
-	Page             int            `json:"page"`
-	Dimensions       PageDimensions `json:"dimensions"`
-	State            PageState      `json:"state"`
-	PrimaryDisplay   *Artifact      `json:"primary_display,omitempty"`
-	RasterFallback   *Artifact      `json:"raster_fallback,omitempty"`
-	SemanticMarkdown Artifact       `json:"semantic_markdown"`
-	TextRuns         Artifact       `json:"text_runs"`
-	Candidates       []Candidate    `json:"candidates"`
-	RemediationState string         `json:"remediation_state"`
+	Page               int                 `json:"page"`
+	Dimensions         PageDimensions      `json:"dimensions"`
+	State              PageState           `json:"state"`
+	PrimaryDisplay     *Artifact           `json:"primary_display,omitempty"`
+	RasterFallback     *Artifact           `json:"raster_fallback,omitempty"`
+	SemanticMarkdown   Artifact            `json:"semantic_markdown"`
+	TextRuns           Artifact            `json:"text_runs"`
+	SourceRasterAssets []SourceRasterAsset `json:"source_raster_assets"`
+	Candidates         []Candidate         `json:"candidates"`
+	RemediationState   string              `json:"remediation_state"`
 }
 
 // Manifest is the durable package contract consumed by downstream packagers.
