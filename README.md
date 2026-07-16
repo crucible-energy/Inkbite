@@ -204,14 +204,16 @@ profile that names the qualified offline renderer and calibration evidence.
 
 For every PDF page it retains the source, emits source-derived `semantic.md`
 and positioned `text-runs.json`, renders a deterministic PDF reference raster,
-and attempts a Poppler/Cairo outlined-glyph SVG. A page becomes `verified_svg`
-only when the profile renderer passes its committed visual gate; otherwise a
-verified reference `raster_fallback` is emitted with a deterministic
-remediation item. The source-aware text candidate is currently recorded as
-unavailable: its eligibility diagnostics require a source font program,
-ToUnicode glyph mapping, approved embedding policy, and pinned WOFF2 subsetter,
-but an eligible positioned-text SVG emitter has not yet been implemented.
-No OCR is substituted for PDF-source text. Painted PDF raster XObjects,
+and attempts a Poppler/Cairo outlined-glyph SVG. When every source text font
+has an embedded TrueType program, a ToUnicode map, and an approved embedding
+policy, the compiler also derives a positioned-text candidate from the same
+Poppler artwork. It subsets each approved source font to WOFF2, masks the
+outlined text paint, and makes the source-derived `<text>` layer visible. Both
+candidates must independently pass the same profile renderer and visual gate;
+the smaller installed candidate is selected. A font, glyph-map, subsetter, or
+visual mismatch leaves that candidate unavailable or failed and never changes
+the outlined candidate's authority. No OCR is substituted for PDF-source text.
+Painted PDF raster XObjects,
 including images reached through Form XObjects, are also retained in
 integrity-hashed page sidecars: supported JPEG streams keep
 their original bytes, while supported Flate, CCITT, and raw streams become
@@ -250,6 +252,18 @@ Each verification also preserves the raw different-pixel count and exclusive
 difference bounding box alongside the calibrated changed-pixel result. Those
 raw observations support review and calibration; they do not auto-approve a
 profile or substitute for the versioned corpus and explicit review.
+
+The optional subsetter is an explicitly pinned wrapper, not an inferred host
+dependency. It must print its configured version for `--version` and accept
+this fixed invocation contract:
+
+```text
+subsetter input.ttf --text-file=characters.txt --no-ignore-missing-unicodes \
+  --flavor=woff2 --output-file=font.woff2
+```
+
+The compiler rejects a missing, malformed, non-WOFF2, or incomplete subset
+rather than substituting another font.
 
 ### Example CLI Usage
 
