@@ -246,6 +246,11 @@ the sibling [shrinkray](https://github.com/crucible-energy/shrinkray) project;
 Inkbite keeps the implementation local because this gate measures renderer
 fidelity, not image-codec tradeoffs.
 
+Each verification also preserves the raw different-pixel count and exclusive
+difference bounding box alongside the calibrated changed-pixel result. Those
+raw observations support review and calibration; they do not auto-approve a
+profile or substitute for the versioned corpus and explicit review.
+
 ### Example CLI Usage
 
 Convert a local file:

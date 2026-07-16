@@ -127,6 +127,15 @@ type Artifact struct {
 	SHA256    string `json:"sha256"`
 }
 
+// DifferenceBounds is the exclusive pixel bounding box of every raw visual
+// difference between a reference raster and a renderer capture.
+type DifferenceBounds struct {
+	XMin int `json:"x_min"`
+	YMin int `json:"y_min"`
+	XMax int `json:"x_max"`
+	YMax int `json:"y_max"`
+}
+
 // PageDimensions records PDF points rather than assuming a device pixel size.
 type PageDimensions struct {
 	WidthPoints  float64 `json:"width_points"`
@@ -166,15 +175,17 @@ type Candidate struct {
 
 // Verification is a profile-specific visual gate result.
 type Verification struct {
-	ProfileID       string              `json:"profile_id"`
-	ProfileVersion  string              `json:"profile_version"`
-	Reference       Artifact            `json:"reference"`
-	Rendered        *Artifact           `json:"rendered,omitempty"`
-	Passed          bool                `json:"passed"`
-	MaxChannelDelta uint8               `json:"max_channel_delta"`
-	ChangedPixels   int                 `json:"changed_pixels"`
-	Calibration     CalibrationEvidence `json:"calibration"`
-	Reason          string              `json:"reason,omitempty"`
+	ProfileID        string              `json:"profile_id"`
+	ProfileVersion   string              `json:"profile_version"`
+	Reference        Artifact            `json:"reference"`
+	Rendered         *Artifact           `json:"rendered,omitempty"`
+	Passed           bool                `json:"passed"`
+	MaxChannelDelta  uint8               `json:"max_channel_delta"`
+	ChangedPixels    int                 `json:"changed_pixels"`
+	DifferentPixels  int                 `json:"different_pixels"`
+	DifferenceBounds *DifferenceBounds   `json:"difference_bounds,omitempty"`
+	Calibration      CalibrationEvidence `json:"calibration"`
+	Reason           string              `json:"reason,omitempty"`
 }
 
 // PageState is the only display state an emitted page can have.

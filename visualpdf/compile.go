@@ -811,6 +811,8 @@ func emitOutlinedCandidate(ctx context.Context, pdftocairo, input, output string
 		} else {
 			verification.MaxChannelDelta = comparison.maxDelta
 			verification.ChangedPixels = comparison.changedPixels
+			verification.DifferentPixels = comparison.differentPixels
+			verification.DifferenceBounds = comparison.differenceBounds
 			verification.Passed = comparison.passed
 			if !comparison.passed {
 				verification.Reason = fmt.Sprintf("visual difference exceeds calibration %s", profile.Calibration.Report)
@@ -873,9 +875,11 @@ func renderSVG(ctx context.Context, profile VisualProfile, input, output string)
 }
 
 type visualComparison struct {
-	maxDelta      uint8
-	changedPixels int
-	passed        bool
+	maxDelta         uint8
+	changedPixels    int
+	differentPixels  int
+	differenceBounds *DifferenceBounds
+	passed           bool
 }
 
 func comparePNG(reference Artifact, rendered *Artifact, output string, calibration CalibrationEvidence) (visualComparison, error) {
@@ -902,6 +906,17 @@ func comparePNG(reference Artifact, rendered *Artifact, output string, calibrati
 			delta := maxUint8(absChannel(rr, sr), absChannel(rg, sg), absChannel(rb, sb), absChannel(ra, sa))
 			if delta > comparison.maxDelta {
 				comparison.maxDelta = delta
+			}
+			if delta > 0 {
+				comparison.differentPixels++
+				if comparison.differenceBounds == nil {
+					comparison.differenceBounds = &DifferenceBounds{XMin: x, YMin: y, XMax: x + 1, YMax: y + 1}
+				} else {
+					comparison.differenceBounds.XMin = min(comparison.differenceBounds.XMin, x)
+					comparison.differenceBounds.YMin = min(comparison.differenceBounds.YMin, y)
+					comparison.differenceBounds.XMax = max(comparison.differenceBounds.XMax, x+1)
+					comparison.differenceBounds.YMax = max(comparison.differenceBounds.YMax, y+1)
+				}
 			}
 			if delta > calibration.Thresholds.MaxChannelDelta {
 				comparison.changedPixels++
