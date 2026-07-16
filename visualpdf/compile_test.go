@@ -156,6 +156,53 @@ func TestCompileFailureLeavesExistingOutputUntouched(t *testing.T) {
 	}
 }
 
+func TestCompileRejectsOutputSymlink(t *testing.T) {
+	root := t.TempDir()
+	fixturePNG := filepath.Join(root, "fixture.png")
+	writeFixturePNG(t, fixturePNG)
+	t.Setenv("FAKE_PNG", fixturePNG)
+	tools := filepath.Join(root, "tools")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTool(t, tools, "pdfinfo", `if [ "$1" = "-v" ]; then echo "pdfinfo version 1.2.3"; else echo "Pages: 1"; fi`)
+	writeTool(t, tools, "pdftotext", `if [ "$1" = "-v" ]; then echo "pdftotext version 1.2.3"; fi`)
+	writeTool(t, tools, "pdftocairo", `if [ "$1" = "-v" ]; then echo "pdftocairo version 1.2.3"; fi`)
+	input := filepath.Join(root, "source.pdf")
+	writeValidPDF(t, input)
+	realOutput := filepath.Join(root, "package")
+	if err := os.Mkdir(realOutput, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(root, "package-link")
+	if err := os.Symlink(realOutput, symlink); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Compile(context.Background(), CompileOptions{
+		InputPath:       input,
+		OutputDirectory: symlink,
+		Toolchain:       Toolchain{Directory: tools, Version: "1.2.3"},
+		Profiles: []VisualProfile{{
+			ID: "fixture", Version: "1", ReferenceDPI: 72,
+			Renderer:    SVGRenderer{Path: filepath.Join(root, "renderer"), Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}},
+			Calibration: fixtureCalibration(t, root),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("expected symlink output rejection, got %v", err)
+	}
+	entries, err := os.ReadDir(realOutput)
+	if err != nil {
+		t.Fatalf("existing output target read failed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("symlink target must remain untouched, got entries: %#v", entries)
+	}
+	if _, err := os.Stat(symlink); err != nil {
+		t.Fatalf("symlink output path should still exist: %v", err)
+	}
+}
+
 func TestCompileUsesVerifiedReferenceAsRasterFallback(t *testing.T) {
 	root := t.TempDir()
 	fixturePNG := filepath.Join(root, "fixture.png")
