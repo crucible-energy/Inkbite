@@ -207,8 +207,9 @@ and positioned `text-runs.json`, renders a deterministic PDF reference raster,
 and attempts a Poppler/Cairo outlined-glyph SVG. When every source text font
 has an embedded TrueType program, a ToUnicode map, and an approved embedding
 policy, the compiler also derives a positioned-text candidate from the same
-Poppler artwork. It subsets each approved source font to WOFF2, masks the
-outlined text paint, and makes the source-derived `<text>` layer visible. Both
+Poppler artwork. It subsets each approved source font to WOFF2, removes only
+Poppler's identifiable glyph definitions and uses, and adds the source-derived
+`<text>` layer without retaining those outline bytes. Both
 candidates must independently pass the same profile renderer and visual gate;
 the smaller installed candidate is selected. A font, glyph-map, subsetter, or
 visual mismatch leaves that candidate unavailable or failed and never changes

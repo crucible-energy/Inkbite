@@ -11,11 +11,17 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/dslipak/pdf"
+)
+
+var (
+	popplerGlyphDefinition = regexp.MustCompile(`(?i)\bid\s*=\s*["']glyph-[^"']+["']`)
+	popplerGlyphReference  = regexp.MustCompile(`(?i)\b(?:xlink:)?href\s*=\s*["']#glyph-[^"']+["']`)
 )
 
 // sourceAwarePage is the source-text information that can be faithfully
@@ -130,9 +136,9 @@ func sourceAwareFontProgram(font pdf.Font, name string) ([]byte, error) {
 }
 
 // emitSourceAwareCandidate derives a second candidate from the already-safe
-// Poppler SVG.  The outlined artwork remains intact except where the mask
-// removes its text paint, so source text becomes the visible text layer while
-// every non-text vector operation remains Poppler's exact output.
+// Poppler SVG. Poppler's identifiable glyph definitions and uses are removed
+// before source text is added, leaving non-text vector artwork intact without
+// making the source-aware candidate structurally larger than its baseline.
 func emitSourceAwareCandidate(
 	ctx context.Context,
 	output, pageDirectory string,
@@ -273,6 +279,10 @@ func emitSourceAwareSVG(outlinedPath, outputPath string, source sourceAwarePage,
 	if err != nil {
 		return err
 	}
+	data, err = stripPopplerGlyphOutlines(data)
+	if err != nil {
+		return err
+	}
 	rootStart := bytes.Index(data, []byte("<svg"))
 	if rootStart < 0 {
 		return errors.New("outlined SVG has no root element")
@@ -282,13 +292,8 @@ func emitSourceAwareSVG(outlinedPath, outputPath string, source sourceAwarePage,
 		return errors.New("outlined SVG root element is incomplete")
 	}
 	rootEnd := rootStart + rootEndOffset
-	defsEnd := bytes.LastIndex(data, []byte("</defs>"))
-	contentStart := rootEnd + 1
-	if defsEnd >= 0 {
-		contentStart = defsEnd + len("</defs>")
-	}
 	contentEnd := bytes.LastIndex(data, []byte("</svg>"))
-	if contentEnd < contentStart {
+	if contentEnd < rootEnd {
 		return errors.New("outlined SVG has no closing root element")
 	}
 	fontReferences, err := sourceAwareFontReferences(source, fontAssets)
@@ -299,28 +304,146 @@ func emitSourceAwareSVG(outlinedPath, outputPath string, source sourceAwarePage,
 	if err != nil {
 		return err
 	}
-	const maskID = "inkbite-source-text-mask"
 	var document bytes.Buffer
-	document.Write(data[:contentStart])
-	document.WriteString("<defs><style>")
-	document.WriteString(fontReferences)
-	document.WriteString("</style><mask id=\"")
-	document.WriteString(maskID)
-	document.WriteString("\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"")
-	document.WriteString(svgNumber(dimensions.WidthPoints))
-	document.WriteString("\" height=\"")
-	document.WriteString(svgNumber(dimensions.HeightPoints))
-	document.WriteString("\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/><g fill=\"black\" stroke=\"black\" stroke-width=\"0.25\">")
-	document.WriteString(text)
-	document.WriteString("</g></mask></defs><g mask=\"url(#")
-	document.WriteString(maskID)
-	document.WriteString(")\">")
-	document.Write(data[contentStart:contentEnd])
-	document.WriteString("</g><g id=\"inkbite-source-text\">")
+	if defsEnd := bytes.LastIndex(data[:contentEnd], []byte("</defs>")); defsEnd >= 0 {
+		document.Write(data[:defsEnd])
+		document.WriteString("<style>")
+		document.WriteString(fontReferences)
+		document.WriteString("</style>")
+		document.Write(data[defsEnd:contentEnd])
+	} else {
+		document.Write(data[:rootEnd+1])
+		document.WriteString("<defs><style>")
+		document.WriteString(fontReferences)
+		document.WriteString("</style></defs>")
+		document.Write(data[rootEnd+1 : contentEnd])
+	}
+	document.WriteString("<g id=\"inkbite-source-text\">")
 	document.WriteString(text)
 	document.WriteString("</g>")
 	document.Write(data[contentEnd:])
 	return os.WriteFile(outputPath, document.Bytes(), 0o644)
+}
+
+func stripPopplerGlyphOutlines(document []byte) ([]byte, error) {
+	var result bytes.Buffer
+	copyStart, cursor := 0, 0
+	definitions, uses := 0, 0
+	for cursor < len(document) {
+		tagStart := bytes.IndexByte(document[cursor:], '<')
+		if tagStart < 0 {
+			break
+		}
+		tagStart += cursor
+		tagEnd, err := svgTagEnd(document, tagStart)
+		if err != nil {
+			return nil, err
+		}
+		tag := document[tagStart:tagEnd]
+		name, closing, selfClosing := svgTagKind(tag)
+		switch {
+		case !closing && name == "g" && popplerGlyphDefinition.Match(tag):
+			elementEnd, err := svgElementEnd(document, tagStart, "g", selfClosing)
+			if err != nil {
+				return nil, err
+			}
+			result.Write(document[copyStart:tagStart])
+			copyStart, cursor = elementEnd, elementEnd
+			definitions++
+		case !closing && name == "use" && popplerGlyphReference.Match(tag):
+			elementEnd, err := svgElementEnd(document, tagStart, "use", selfClosing)
+			if err != nil {
+				return nil, err
+			}
+			result.Write(document[copyStart:tagStart])
+			copyStart, cursor = elementEnd, elementEnd
+			uses++
+		default:
+			cursor = tagEnd
+		}
+	}
+	if definitions == 0 || uses == 0 {
+		return nil, errors.New("outlined SVG has no removable Poppler glyph outlines")
+	}
+	result.Write(document[copyStart:])
+	return result.Bytes(), nil
+}
+
+func svgElementEnd(document []byte, start int, expectedName string, selfClosing bool) (int, error) {
+	startEnd, err := svgTagEnd(document, start)
+	if err != nil {
+		return 0, err
+	}
+	if selfClosing {
+		return startEnd, nil
+	}
+	depth, cursor := 1, startEnd
+	for cursor < len(document) {
+		tagStart := bytes.IndexByte(document[cursor:], '<')
+		if tagStart < 0 {
+			break
+		}
+		tagStart += cursor
+		tagEnd, err := svgTagEnd(document, tagStart)
+		if err != nil {
+			return 0, err
+		}
+		name, closing, nestedSelfClosing := svgTagKind(document[tagStart:tagEnd])
+		if name == expectedName {
+			if closing {
+				depth--
+				if depth == 0 {
+					return tagEnd, nil
+				}
+			} else if !nestedSelfClosing {
+				depth++
+			}
+		}
+		cursor = tagEnd
+	}
+	return 0, fmt.Errorf("outlined SVG %s element is incomplete", expectedName)
+}
+
+func svgTagEnd(document []byte, start int) (int, error) {
+	quote := byte(0)
+	for cursor := start + 1; cursor < len(document); cursor++ {
+		character := document[cursor]
+		if quote != 0 {
+			if character == quote {
+				quote = 0
+			}
+			continue
+		}
+		if character == '\'' || character == '"' {
+			quote = character
+			continue
+		}
+		if character == '>' {
+			return cursor + 1, nil
+		}
+	}
+	return 0, errors.New("outlined SVG has an incomplete element")
+}
+
+func svgTagKind(tag []byte) (name string, closing, selfClosing bool) {
+	trimmed := bytes.TrimSpace(tag)
+	if len(trimmed) < 3 || trimmed[0] != '<' || trimmed[1] == '!' || trimmed[1] == '?' {
+		return "", false, false
+	}
+	cursor := 1
+	if trimmed[cursor] == '/' {
+		closing = true
+		cursor++
+	}
+	start := cursor
+	for cursor < len(trimmed) && ((trimmed[cursor] >= 'a' && trimmed[cursor] <= 'z') || (trimmed[cursor] >= 'A' && trimmed[cursor] <= 'Z') || trimmed[cursor] == ':' || trimmed[cursor] == '-') {
+		cursor++
+	}
+	name = strings.ToLower(string(trimmed[start:cursor]))
+	for cursor = len(trimmed) - 2; cursor > 0 && (trimmed[cursor] == ' ' || trimmed[cursor] == '\t' || trimmed[cursor] == '\n' || trimmed[cursor] == '\r'); cursor-- {
+	}
+	selfClosing = !closing && cursor > 0 && trimmed[cursor] == '/'
+	return name, closing, selfClosing
 }
 
 func sourceAwareFontReferences(source sourceAwarePage, assets []Artifact) (string, error) {

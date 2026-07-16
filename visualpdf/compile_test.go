@@ -74,7 +74,6 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 		WOFF2Subsetter:  &WOFF2Subsetter{Path: subsetter, Version: "1.0"},
 		Profiles: []VisualProfile{{
 			ID: "fixture-webview", Version: "1", ReferenceDPI: 72,
-<<<<<<< HEAD
 			Renderer:    SVGRenderer{Path: renderer, Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}", "--width", "{width}", "--height", "{height}"}},
 			Calibration: fixtureCalibration(t, root, "fixture-webview", "1"),
 		}},
@@ -154,7 +153,11 @@ case " $* " in *" -bbox "*) echo '<?xml version="1.0"?><doc><word xMin="100" yMi
 if [ "$1" = "-v" ]; then echo "pdftocairo version 1.2.3"; exit 0; fi
 last=""
 for value in "$@"; do last="$value"; done
-case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="144"><defs></defs><g fill="black"><path d="M0 0"/></g></svg>' > "$last";; *) cp "$FAKE_PNG" "${last}.png";; esac
+case " $* " in *" -svg "*) {
+  printf '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="300" height="144"><defs><g id="glyph-0-0">'
+  i=0; while [ "$i" -lt 2048 ]; do printf '<path d="M0 0"/>'; i=$((i+1)); done
+  printf '</g></defs><g fill="black"><use xlink:href="#glyph-0-0" x="100" y="44"/></g></svg>'
+} > "$last";; *) cp "$FAKE_PNG" "${last}.png";; esac
 `)
 	renderer := filepath.Join(root, "renderer")
 	writeTool(t, root, "renderer", `if [ "$1" = "--version" ]; then echo "renderer 9"; exit 0; fi; cp "$FAKE_PNG" "$4"`)
@@ -184,7 +187,7 @@ cp "$FAKE_WOFF2" "$output"
 		Profiles: []VisualProfile{{
 			ID: "fixture", Version: "1", ReferenceDPI: 72,
 			Renderer:    SVGRenderer{Path: renderer, Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}},
-			Calibration: fixtureCalibration(t, root),
+			Calibration: fixtureCalibration(t, root, "fixture", "1"),
 		}},
 	})
 	if err != nil {
@@ -193,6 +196,9 @@ cp "$FAKE_WOFF2" "$output"
 	candidate := manifest.Pages[0].Candidates[1]
 	if candidate.Kind != "source_aware_text" || candidate.State != CandidateVerified || candidate.SVG == nil {
 		t.Fatalf("expected verified source-aware candidate, got %#v", candidate)
+	}
+	if manifest.Pages[0].PrimaryDisplay == nil || manifest.Pages[0].PrimaryDisplay.Locator != candidate.SVG.Locator {
+		t.Fatalf("expected smaller verified source-aware SVG to become the primary display, got %#v", manifest.Pages[0].PrimaryDisplay)
 	}
 	if len(candidate.ReferencedAssets) != 1 || candidate.ReferencedAssets[0].MediaType != "font/woff2" {
 		t.Fatalf("expected one WOFF2 candidate asset, got %#v", candidate.ReferencedAssets)
@@ -203,6 +209,9 @@ cp "$FAKE_WOFF2" "$output"
 	}
 	if !bytes.Contains(svg, []byte("@font-face")) || !bytes.Contains(svg, []byte("<text")) || !bytes.Contains(svg, []byte(">A</text>")) {
 		t.Fatalf("source-aware SVG does not contain positioned source text: %s", svg)
+	}
+	if bytes.Contains(svg, []byte("glyph-0-0")) {
+		t.Fatalf("source-aware SVG retains removable Poppler glyph outlines: %s", svg)
 	}
 	gotArguments, err := os.ReadFile(arguments)
 	if err != nil {
