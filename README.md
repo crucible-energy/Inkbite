@@ -246,6 +246,14 @@ the sibling [shrinkray](https://github.com/crucible-energy/shrinkray) project;
 Inkbite keeps the implementation local because this gate measures renderer
 fidelity, not image-codec tradeoffs.
 
+A manifest cannot attest to itself. Store its SHA-256 in the trusted package
+record (for example, the Polymorph record that stages the package), then call
+`visualpdf.LoadVerifiedPackage` with that expected digest before exposing any
+package file. It rejects altered manifests or sidecars, symlinks, escaping
+locators, unsafe SVG references, and display states that cannot ship. Computing
+the digest from an untrusted directory only helps a builder record a package;
+it does not establish trust at load time.
+
 Each verification also preserves the raw different-pixel count and exclusive
 difference bounding box alongside the calibrated changed-pixel result. Those
 raw observations support review and calibration; they do not auto-approve a
