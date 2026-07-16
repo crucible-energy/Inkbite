@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/image/font/gofont/goregular"
 )
 
 func TestCompileEmitsVerifiedPackageWithSourceText(t *testing.T) {
@@ -162,7 +164,7 @@ printf '%s\n' "$*" > "$FAKE_SUBSETTER_ARGUMENTS"
 cp "$FAKE_WOFF2" "$output"
 `)
 	input := filepath.Join(root, "source.pdf")
-	if err := os.WriteFile(input, embeddedTrueTypePDF(), 0o644); err != nil {
+	if err := os.WriteFile(input, embeddedTrueTypePDF(goregular.TTF), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	output := filepath.Join(root, "package")
@@ -802,6 +804,31 @@ printf 'not a font' > "$output"
 	}
 }
 
+func TestRealWOFF2SubsetterSmoke(t *testing.T) {
+	subsetter := os.Getenv("INKBITE_REAL_WOFF2_SUBSETTER")
+	if subsetter == "" {
+		t.Skip("set INKBITE_REAL_WOFF2_SUBSETTER to run the pinned WOFF2 subsetter smoke")
+	}
+	root := t.TempDir()
+	pageDirectory := filepath.Join(root, "pages", "0001")
+	if err := os.MkdirAll(pageDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := resolveWOFF2Subsetter(context.Background(), &WOFF2Subsetter{Path: subsetter, Version: "fonttools 4.60.2"})
+	if err != nil {
+		t.Fatalf("resolveWOFF2Subsetter() error = %v", err)
+	}
+	assets, err := emitWOFF2Subsets(context.Background(), root, pageDirectory, sourceAwarePage{fonts: []sourceAwareFont{{
+		program: goregular.TTF, characters: map[rune]struct{}{'F': {}, 'A': {}},
+	}}}, pinned)
+	if err != nil {
+		t.Fatalf("emitWOFF2Subsets() error = %v", err)
+	}
+	if len(assets) != 1 || assets[0].MediaType != "font/woff2" || assets[0].ByteCount <= 48 {
+		t.Fatalf("unexpected real WOFF2 subset asset: %#v", assets)
+	}
+}
+
 func testTrueTypeProgram(flags uint16) []byte {
 	data := make([]byte, 64)
 	binary.BigEndian.PutUint16(data[4:6], 1)
@@ -820,8 +847,7 @@ func testWOFF2Program() []byte {
 	return data
 }
 
-func embeddedTrueTypePDF() []byte {
-	fontProgram := testTrueTypeProgram(0)
+func embeddedTrueTypePDF(fontProgram []byte) []byte {
 	toUnicode := []byte(`/CIDInit /ProcSet findresource begin
 12 dict begin
 begincmap
