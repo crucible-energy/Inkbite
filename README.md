@@ -230,15 +230,21 @@ inkbite visual pdf \
   --poppler-version 26.07.0 \
   --woff2-subsetter /pinned/woff2-subsetter \
   --woff2-subsetter-version 1.0.0 \
-  --profiles ./visualpdf/profiles/iris-offline-webview-v2.json
+  --profiles ./visualpdf/profiles/iris-offline-webview-v3.json
 ```
 
-The checked-in profile is intentionally unqualified: its renderer path is a
-placeholder and therefore fails closed until an application supplies a
-qualified offline-WebView renderer, device/corpus evidence, and reviewed
-calibration report. The compiler writes `manifest.json` with source and asset
-hashes, dimensions, candidates, verification evidence, semantic artifacts,
-and remediation queue.
+The checked-in v3 profile is intentionally unqualified and fails closed: its
+renderer path is a placeholder and its hash-pinned calibration report has a
+pending review. A usable profile needs a qualified offline-WebView renderer,
+an integrity-verified comparison corpus, and an explicit approved review with
+reviewer and timestamp. Its numeric pixel limits live only in that reviewed
+report and are bound to the compiler's named comparison algorithm. The
+compiler writes `manifest.json` with source and asset hashes, dimensions,
+candidates, verification evidence, semantic artifacts, and remediation queue.
+This evidence shape follows the measured-corpus and provenance discipline in
+the sibling [shrinkray](https://github.com/crucible-energy/shrinkray) project;
+Inkbite keeps the implementation local because this gate measures renderer
+fidelity, not image-codec tradeoffs.
 
 ### Example CLI Usage
 

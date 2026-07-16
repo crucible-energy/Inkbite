@@ -12,7 +12,13 @@ const (
 	// ManifestSchemaVersion is the version of the emitted visual package manifest.
 	ManifestSchemaVersion = "inkbite.visualpdf.manifest.v3"
 	// ProfileSetSchemaVersion is the version of a visual profile set document.
-	ProfileSetSchemaVersion = "inkbite.visualpdf.profiles.v2"
+	ProfileSetSchemaVersion = "inkbite.visualpdf.profiles.v3"
+	// CalibrationReportSchemaVersion is the version of a reviewed visual
+	// calibration report referenced by a v3 profile.
+	CalibrationReportSchemaVersion = "inkbite.visualpdf.calibration.v1"
+	// VisualComparisonAlgorithm identifies the pixel comparison implemented by
+	// this compiler. Calibration limits are valid only for this exact algorithm.
+	VisualComparisonAlgorithm = "rgba-pixel-delta-v1"
 )
 
 // Toolchain identifies the build-time Poppler installation. Directory must be
@@ -42,25 +48,57 @@ type SVGRenderer struct {
 	Arguments []string `json:"arguments"`
 }
 
-// Calibration names the committed calibration evidence that supplied a
-// profile's numeric visual tolerance. The compiler never invents tolerances.
-type Calibration struct {
-	CorpusID         string `json:"corpus_id"`
-	Report           string `json:"report"`
-	ReportSHA256     string `json:"report_sha256"`
-	MaxChannelDelta  uint8  `json:"max_channel_delta"`
-	MaxChangedPixels int    `json:"max_changed_pixels"`
-	reportPath       string
+// ProfileCalibration is the only calibration material allowed in a v3 profile
+// set. Numeric thresholds and review metadata are loaded from the pinned
+// report rather than accepted from the profile itself.
+type ProfileCalibration struct {
+	Report       string `json:"report"`
+	ReportSHA256 string `json:"report_sha256"`
+	reportPath   string
+	rootPath     string
+	evidence     CalibrationEvidence
+}
+
+// CalibrationThresholds are the reviewed limits applied by the compiler.
+type CalibrationThresholds struct {
+	MaxChannelDelta  uint8 `json:"max_channel_delta"`
+	MaxChangedPixels int   `json:"max_changed_pixels"`
+}
+
+// CalibrationCorpus identifies the committed calibration input that produced
+// the reviewed thresholds.
+type CalibrationCorpus struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
+	Locator string `json:"locator"`
+	SHA256  string `json:"sha256"`
+}
+
+// CalibrationReview records the explicit disposition of the calibration run.
+type CalibrationReview struct {
+	Outcome    string `json:"outcome"`
+	ReviewedAt string `json:"reviewed_at"`
+	ReviewedBy string `json:"reviewed_by"`
+}
+
+// CalibrationEvidence is persisted in every visual verification result.
+type CalibrationEvidence struct {
+	Comparator       string                `json:"comparator"`
+	Report           string                `json:"report"`
+	ReportSHA256     string                `json:"report_sha256"`
+	ComparisonCorpus CalibrationCorpus     `json:"comparison_corpus"`
+	Thresholds       CalibrationThresholds `json:"thresholds"`
+	Review           CalibrationReview     `json:"review"`
 }
 
 // VisualProfile defines one deterministic reference render and matching SVG
 // verification environment.
 type VisualProfile struct {
-	ID           string      `json:"id"`
-	Version      string      `json:"version"`
-	ReferenceDPI int         `json:"reference_dpi"`
-	Renderer     SVGRenderer `json:"svg_renderer"`
-	Calibration  Calibration `json:"calibration"`
+	ID           string             `json:"id"`
+	Version      string             `json:"version"`
+	ReferenceDPI int                `json:"reference_dpi"`
+	Renderer     SVGRenderer        `json:"svg_renderer"`
+	Calibration  ProfileCalibration `json:"calibration"`
 }
 
 // ProfileSet is the versioned file format accepted by LoadProfileSet.
@@ -128,15 +166,15 @@ type Candidate struct {
 
 // Verification is a profile-specific visual gate result.
 type Verification struct {
-	ProfileID       string      `json:"profile_id"`
-	ProfileVersion  string      `json:"profile_version"`
-	Reference       Artifact    `json:"reference"`
-	Rendered        *Artifact   `json:"rendered,omitempty"`
-	Passed          bool        `json:"passed"`
-	MaxChannelDelta uint8       `json:"max_channel_delta"`
-	ChangedPixels   int         `json:"changed_pixels"`
-	Calibration     Calibration `json:"calibration"`
-	Reason          string      `json:"reason,omitempty"`
+	ProfileID       string              `json:"profile_id"`
+	ProfileVersion  string              `json:"profile_version"`
+	Reference       Artifact            `json:"reference"`
+	Rendered        *Artifact           `json:"rendered,omitempty"`
+	Passed          bool                `json:"passed"`
+	MaxChannelDelta uint8               `json:"max_channel_delta"`
+	ChangedPixels   int                 `json:"changed_pixels"`
+	Calibration     CalibrationEvidence `json:"calibration"`
+	Reason          string              `json:"reason,omitempty"`
 }
 
 // PageState is the only display state an emitted page can have.

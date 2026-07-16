@@ -1,0 +1,23 @@
+{
+  "comparator": "rgba-pixel-delta-v1",
+  "comparison_corpus": {
+    "id": "iris-visual-calibration-v1",
+    "locator": "iris-offline-webview-v3-calibration-corpus.json",
+    "sha256": "9562bdfef22ce9f1e351c470ee8eae29d22aff3989846d91d612e29c0f0d5571",
+    "version": "1"
+  },
+  "profile": {
+    "id": "iris-offline-webview",
+    "version": "3"
+  },
+  "review": {
+    "outcome": "pending",
+    "reviewed_at": "",
+    "reviewed_by": ""
+  },
+  "schema_version": "inkbite.visualpdf.calibration.v1",
+  "thresholds": {
+    "max_changed_pixels": 0,
+    "max_channel_delta": 0
+  }
+}

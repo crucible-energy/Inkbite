@@ -224,14 +224,11 @@ func validateProfiles(profiles []VisualProfile) error {
 		if countToken(profile.Renderer.Arguments, "{input}") != 1 || countToken(profile.Renderer.Arguments, "{output}") != 1 {
 			return fmt.Errorf("visual profile %q renderer arguments need exactly one {input} and one {output}", id)
 		}
-		if strings.TrimSpace(profile.Calibration.CorpusID) == "" || strings.TrimSpace(profile.Calibration.Report) == "" {
-			return fmt.Errorf("visual profile %q needs committed calibration corpus and report identifiers", id)
+		if strings.TrimSpace(profile.Calibration.Report) == "" {
+			return fmt.Errorf("visual profile %q needs a committed calibration report", id)
 		}
 		if !isSHA256Digest(profile.Calibration.ReportSHA256) {
 			return fmt.Errorf("visual profile %q needs a lowercase SHA-256 calibration report hash", id)
-		}
-		if profile.Calibration.MaxChangedPixels < 0 {
-			return fmt.Errorf("visual profile %q max_changed_pixels cannot be negative", id)
 		}
 	}
 	return nil
@@ -240,7 +237,7 @@ func validateProfiles(profiles []VisualProfile) error {
 func verifyCalibrationEvidence(profiles []VisualProfile, baseDirectory string) error {
 	for index := range profiles {
 		calibration := &profiles[index].Calibration
-		reportPath, err := resolveCalibrationReport(calibration, baseDirectory)
+		reportPath, rootPath, err := resolveCalibrationReport(calibration, baseDirectory)
 		if err != nil {
 			return fmt.Errorf("visual profile %q calibration evidence: %w", profiles[index].ID, err)
 		}
@@ -251,39 +248,141 @@ func verifyCalibrationEvidence(profiles []VisualProfile, baseDirectory string) e
 		if hash != calibration.ReportSHA256 {
 			return fmt.Errorf("visual profile %q calibration report hash does not match %s", profiles[index].ID, calibration.Report)
 		}
+		evidence, err := loadCalibrationEvidence(reportPath, rootPath, profiles[index])
+		if err != nil {
+			return fmt.Errorf("visual profile %q calibration evidence: %w", profiles[index].ID, err)
+		}
+		calibration.evidence = evidence
 	}
 	return nil
 }
 
-func resolveCalibrationReport(calibration *Calibration, baseDirectory string) (string, error) {
+func resolveCalibrationReport(calibration *ProfileCalibration, baseDirectory string) (string, string, error) {
 	if calibration.reportPath != "" {
-		return calibration.reportPath, nil
+		return calibration.reportPath, calibration.rootPath, nil
 	}
 	if baseDirectory == "" {
 		if !filepath.IsAbs(calibration.Report) {
-			return "", errors.New("report must be absolute when profiles are not loaded from a profile set")
+			return "", "", errors.New("report must be absolute when profiles are not loaded from a profile set")
 		}
-		calibration.reportPath = filepath.Clean(calibration.Report)
-		return calibration.reportPath, nil
+		path, err := filepath.EvalSymlinks(filepath.Clean(calibration.Report))
+		if err != nil {
+			return "", "", fmt.Errorf("resolve report: %w", err)
+		}
+		calibration.reportPath = path
+		calibration.rootPath = filepath.Dir(path)
+		return calibration.reportPath, calibration.rootPath, nil
 	}
 	if filepath.IsAbs(calibration.Report) {
-		return "", errors.New("report must be relative to the profile set")
+		return "", "", errors.New("report must be relative to the profile set")
 	}
 	baseDirectory, err := filepath.EvalSymlinks(filepath.Clean(baseDirectory))
 	if err != nil {
-		return "", fmt.Errorf("resolve profile set directory: %w", err)
+		return "", "", fmt.Errorf("resolve profile set directory: %w", err)
 	}
 	path := filepath.Clean(filepath.Join(baseDirectory, filepath.FromSlash(calibration.Report)))
 	path, err = filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve report: %w", err)
+		return "", "", fmt.Errorf("resolve report: %w", err)
 	}
 	relative, err := filepath.Rel(baseDirectory, path)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", errors.New("report escapes the profile set directory")
+		return "", "", errors.New("report escapes the profile set directory")
 	}
 	calibration.reportPath = path
-	return path, nil
+	calibration.rootPath = baseDirectory
+	return path, baseDirectory, nil
+}
+
+type calibrationReport struct {
+	SchemaVersion    string                `json:"schema_version"`
+	Profile          calibrationProfile    `json:"profile"`
+	Comparator       string                `json:"comparator"`
+	ComparisonCorpus CalibrationCorpus     `json:"comparison_corpus"`
+	Thresholds       CalibrationThresholds `json:"thresholds"`
+	Review           CalibrationReview     `json:"review"`
+}
+
+type calibrationProfile struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
+}
+
+func loadCalibrationEvidence(reportPath, rootPath string, profile VisualProfile) (CalibrationEvidence, error) {
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		return CalibrationEvidence{}, fmt.Errorf("read calibration report: %w", err)
+	}
+	var report calibrationReport
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&report); err != nil {
+		return CalibrationEvidence{}, fmt.Errorf("decode calibration report: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return CalibrationEvidence{}, errors.New("decode calibration report: trailing JSON")
+	}
+	if report.SchemaVersion != CalibrationReportSchemaVersion {
+		return CalibrationEvidence{}, fmt.Errorf("unsupported calibration report schema %q", report.SchemaVersion)
+	}
+	if report.Profile.ID != profile.ID || report.Profile.Version != profile.Version {
+		return CalibrationEvidence{}, errors.New("calibration report profile does not match visual profile")
+	}
+	if report.Comparator != VisualComparisonAlgorithm {
+		return CalibrationEvidence{}, fmt.Errorf("calibration report comparator must be %q", VisualComparisonAlgorithm)
+	}
+	if err := validateCalibrationCorpus(report.ComparisonCorpus, reportPath, rootPath); err != nil {
+		return CalibrationEvidence{}, err
+	}
+	if report.Thresholds.MaxChangedPixels < 0 {
+		return CalibrationEvidence{}, errors.New("calibration report max_changed_pixels cannot be negative")
+	}
+	if report.Review.Outcome != "approved" {
+		return CalibrationEvidence{}, errors.New("calibration review outcome must be approved")
+	}
+	if strings.TrimSpace(report.Review.ReviewedBy) == "" {
+		return CalibrationEvidence{}, errors.New("calibration review reviewed_by is required")
+	}
+	if _, err := time.Parse(time.RFC3339, report.Review.ReviewedAt); err != nil {
+		return CalibrationEvidence{}, errors.New("calibration review reviewed_at must be an RFC3339 timestamp")
+	}
+	return CalibrationEvidence{
+		Comparator:       report.Comparator,
+		Report:           profile.Calibration.Report,
+		ReportSHA256:     profile.Calibration.ReportSHA256,
+		ComparisonCorpus: report.ComparisonCorpus,
+		Thresholds:       report.Thresholds,
+		Review:           report.Review,
+	}, nil
+}
+
+func validateCalibrationCorpus(corpus CalibrationCorpus, reportPath, rootPath string) error {
+	if strings.TrimSpace(corpus.ID) == "" || strings.TrimSpace(corpus.Version) == "" {
+		return errors.New("calibration report comparison_corpus needs id and version")
+	}
+	if strings.TrimSpace(corpus.Locator) == "" || filepath.IsAbs(corpus.Locator) {
+		return errors.New("calibration report comparison_corpus locator must be relative")
+	}
+	if !isSHA256Digest(corpus.SHA256) {
+		return errors.New("calibration report comparison_corpus needs a lowercase SHA-256 hash")
+	}
+	path := filepath.Clean(filepath.Join(filepath.Dir(reportPath), filepath.FromSlash(corpus.Locator)))
+	path, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolve calibration corpus: %w", err)
+	}
+	relative, err := filepath.Rel(rootPath, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("calibration corpus escapes the profile set directory")
+	}
+	hash, err := sha256File(path)
+	if err != nil {
+		return fmt.Errorf("read calibration corpus: %w", err)
+	}
+	if hash != corpus.SHA256 {
+		return errors.New("calibration corpus hash does not match calibration report")
+	}
+	return nil
 }
 
 func isSHA256Digest(value string) bool {
@@ -655,7 +754,7 @@ func emitReferences(ctx context.Context, pdftocairo, input, output string, page 
 		if err != nil {
 			return nil, err
 		}
-		references = append(references, Verification{ProfileID: profile.ID, ProfileVersion: profile.Version, Reference: artifact, Calibration: profile.Calibration})
+		references = append(references, Verification{ProfileID: profile.ID, ProfileVersion: profile.Version, Reference: artifact, Calibration: profile.Calibration.evidence})
 	}
 	return references, nil
 }
@@ -704,7 +803,7 @@ func emitOutlinedCandidate(ctx context.Context, pdftocairo, input, output string
 			continue
 		}
 		verification.Rendered = &renderedArtifact
-		comparison, compareErr := comparePNG(references[index].Reference, verification.Rendered, output, profile.Calibration)
+		comparison, compareErr := comparePNG(references[index].Reference, verification.Rendered, output, profile.Calibration.evidence)
 		if compareErr != nil {
 			verification.Passed = false
 			verification.Reason = compareErr.Error()
@@ -779,7 +878,7 @@ type visualComparison struct {
 	passed        bool
 }
 
-func comparePNG(reference Artifact, rendered *Artifact, output string, calibration Calibration) (visualComparison, error) {
+func comparePNG(reference Artifact, rendered *Artifact, output string, calibration CalibrationEvidence) (visualComparison, error) {
 	if rendered == nil {
 		return visualComparison{}, errors.New("SVG renderer did not emit an artifact")
 	}
@@ -804,12 +903,12 @@ func comparePNG(reference Artifact, rendered *Artifact, output string, calibrati
 			if delta > comparison.maxDelta {
 				comparison.maxDelta = delta
 			}
-			if delta > calibration.MaxChannelDelta {
+			if delta > calibration.Thresholds.MaxChannelDelta {
 				comparison.changedPixels++
 			}
 		}
 	}
-	comparison.passed = comparison.changedPixels <= calibration.MaxChangedPixels
+	comparison.passed = comparison.changedPixels <= calibration.Thresholds.MaxChangedPixels
 	return comparison, nil
 }
 
