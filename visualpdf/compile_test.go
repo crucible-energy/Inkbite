@@ -110,6 +110,17 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	if len(manifest.RemediationQueue) != 0 {
 		t.Fatalf("expected no remediation items, got %#v", manifest.RemediationQueue)
 	}
+	expected, err := ManifestSHA256(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadVerifiedPackage(output, expected)
+	if err != nil {
+		t.Fatalf("expected compiled verified SVG package to load: %v", err)
+	}
+	if loaded.Pages[0].State != PageVerifiedSVG {
+		t.Fatalf("loaded package lost verified SVG state: %#v", loaded.Pages[0])
+	}
 	outputInfo, err := os.Stat(output)
 	if err != nil {
 		t.Fatalf("compiled package output should exist: %v", err)
@@ -318,6 +329,13 @@ func TestCompileUsesVerifiedReferenceAsRasterFallback(t *testing.T) {
 	if page.State != PageRasterFallback || page.RasterFallback == nil || len(manifest.RemediationQueue) != 1 {
 		t.Fatalf("expected verified fallback and remediation, got %#v %#v", page, manifest.RemediationQueue)
 	}
+	expected, err := ManifestSHA256(filepath.Join(root, "package"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadVerifiedPackage(filepath.Join(root, "package"), expected); err != nil {
+		t.Fatalf("expected verified raster fallback package to load: %v", err)
+	}
 }
 
 func TestComparePNGRecordsRawDifferenceEvidence(t *testing.T) {
@@ -353,6 +371,94 @@ func TestComparePNGRecordsRawDifferenceEvidence(t *testing.T) {
 	}
 	if comparison.differenceBounds == nil || *comparison.differenceBounds != (DifferenceBounds{XMin: 1, YMin: 0, XMax: 3, YMax: 2}) {
 		t.Fatalf("difference bounds = %#v", comparison.differenceBounds)
+	}
+}
+
+func TestLoadVerifiedPackageRejectsManifestAndAssetTampering(t *testing.T) {
+	packageRoot, manifest := writeVerifiedPackageFixture(t)
+	expected, err := ManifestSHA256(packageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadVerifiedPackage(packageRoot, expected)
+	if err != nil {
+		t.Fatalf("LoadVerifiedPackage() error = %v", err)
+	}
+	if loaded.Source != manifest.Source || len(loaded.Pages) != 1 || loaded.Pages[0].PrimaryDisplay == nil {
+		t.Fatalf("unexpected verified package: %#v", loaded)
+	}
+
+	svgPath := filepath.Join(packageRoot, filepath.FromSlash(manifest.Pages[0].PrimaryDisplay.Locator))
+	if err := os.WriteFile(svgPath, []byte(`<svg xmlns="http://www.w3.org/2000/svg"><path d="M1 1"/></svg>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadVerifiedPackage(packageRoot, expected); err == nil || !strings.Contains(err.Error(), "SHA-256") {
+		t.Fatalf("expected sidecar tampering rejection, got %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(packageRoot, "manifest.json"), []byte(`{"schema_version":"tampered"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadVerifiedPackage(packageRoot, expected); err == nil || !strings.Contains(err.Error(), "manifest SHA-256") {
+		t.Fatalf("expected manifest tampering rejection, got %v", err)
+	}
+}
+
+func TestLoadVerifiedPackageRejectsUnlistedSVGAsset(t *testing.T) {
+	packageRoot, manifest := writeVerifiedPackageFixture(t)
+	svgPath := filepath.Join(packageRoot, filepath.FromSlash(manifest.Pages[0].PrimaryDisplay.Locator))
+	if err := os.WriteFile(svgPath, []byte(`<svg xmlns="http://www.w3.org/2000/svg"><image href="unlisted.png"/></svg>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	svg, err := artifactFor(packageRoot, svgPath, "image/svg+xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Pages[0].PrimaryDisplay = &svg
+	manifest.Pages[0].Candidates[0].SVG = &svg
+	manifest.Pages[0].Candidates[0].InstalledByteCount = svg.ByteCount
+	if err := writeJSON(filepath.Join(packageRoot, "manifest.json"), manifest); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := ManifestSHA256(packageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadVerifiedPackage(packageRoot, expected); err == nil || !strings.Contains(err.Error(), "unsafe external resource") {
+		t.Fatalf("expected unlisted SVG asset rejection, got %v", err)
+	}
+}
+
+func TestLoadVerifiedPackageRejectsEscapingArtifactLocator(t *testing.T) {
+	packageRoot, manifest := writeVerifiedPackageFixture(t)
+	manifest.Pages[0].SemanticMarkdown.Locator = "../source.pdf"
+	if err := writeJSON(filepath.Join(packageRoot, "manifest.json"), manifest); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := ManifestSHA256(packageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadVerifiedPackage(packageRoot, expected); err == nil || !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("expected escaping artifact locator rejection, got %v", err)
+	}
+}
+
+func TestLoadVerifiedPackageRejectsSymlinkArtifact(t *testing.T) {
+	packageRoot, manifest := writeVerifiedPackageFixture(t)
+	semanticPath := filepath.Join(packageRoot, filepath.FromSlash(manifest.Pages[0].SemanticMarkdown.Locator))
+	if err := os.Remove(semanticPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../source.pdf", semanticPath); err != nil {
+		t.Skipf("cannot create test symlink: %v", err)
+	}
+	expected, err := ManifestSHA256(packageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadVerifiedPackage(packageRoot, expected); err == nil || !strings.Contains(err.Error(), "non-symlink") {
+		t.Fatalf("expected symlink artifact rejection, got %v", err)
 	}
 }
 
@@ -795,6 +901,77 @@ func writeFixturePNG(t *testing.T, path string) {
 	pixels := image.NewRGBA(image.Rect(0, 0, 1, 1))
 	pixels.Set(0, 0, color.RGBA{R: 10, G: 20, B: 30, A: 255})
 	writePNG(t, path, pixels)
+}
+
+func writeVerifiedPackageFixture(t *testing.T) (string, Manifest) {
+	t.Helper()
+	packageRoot := filepath.Join(t.TempDir(), "package")
+	pageRoot := filepath.Join(packageRoot, "pages", "0001")
+	if err := os.MkdirAll(pageRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(packageRoot, "source.pdf")
+	semanticPath := filepath.Join(pageRoot, "semantic.md")
+	runsPath := filepath.Join(pageRoot, "text-runs.json")
+	svgPath := filepath.Join(pageRoot, "outlined-glyph.svg")
+	referencePath := filepath.Join(pageRoot, "reference-fixture.png")
+	for path, contents := range map[string]string{
+		sourcePath:   "%PDF-fixture",
+		semanticPath: "Source text\n",
+		runsPath:     "[]\n",
+		svgPath:      `<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>`,
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFixturePNG(t, referencePath)
+	source, err := artifactFor(packageRoot, sourcePath, "application/pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	semantic, err := artifactFor(packageRoot, semanticPath, "text/markdown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, err := artifactFor(packageRoot, runsPath, "application/json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svg, err := artifactFor(packageRoot, svgPath, "image/svg+xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := artifactFor(packageRoot, referencePath, "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{
+		SchemaVersion:   ManifestSchemaVersion,
+		CompilerVersion: "test",
+		GeneratedAt:     "2026-07-16T00:00:00Z",
+		Source:          source,
+		Toolchain:       Toolchain{Directory: "/pinned/poppler", Version: "test"},
+		Pages: []PageManifest{{
+			Page:               1,
+			Dimensions:         PageDimensions{WidthPoints: 72, HeightPoints: 72},
+			State:              PageVerifiedSVG,
+			PrimaryDisplay:     &svg,
+			SemanticMarkdown:   semantic,
+			TextRuns:           runs,
+			SourceRasterAssets: []SourceRasterAsset{},
+			Candidates: []Candidate{
+				{Kind: "outlined_glyph", State: CandidateVerified, SVG: &svg, ReferencedAssets: []Artifact{}, InstalledByteCount: svg.ByteCount, Verification: []Verification{{ProfileID: "fixture", ProfileVersion: "1", Reference: reference, Rendered: &reference, Passed: true}}},
+				{Kind: "source_aware_text", State: CandidateUnavailable, ReferencedAssets: []Artifact{}, Verification: []Verification{}, Reason: "fixture"},
+			},
+			RemediationState: "none",
+		}},
+		RemediationQueue: []RemediationItem{},
+	}
+	if err := writeJSON(filepath.Join(packageRoot, "manifest.json"), manifest); err != nil {
+		t.Fatal(err)
+	}
+	return packageRoot, manifest
 }
 
 func writePNG(t *testing.T, path string, pixels image.Image) {
