@@ -56,7 +56,7 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	input := filepath.Join(root, "source.pdf")
 	writeValidPDF(t, input)
 	output := filepath.Join(root, "package")
-	if err := os.Mkdir(output, 0o755); err != nil {
+	if err := os.Mkdir(output, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	subsetter := filepath.Join(root, "woff2-subsetter")
@@ -108,6 +108,13 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	}
 	if len(manifest.RemediationQueue) != 0 {
 		t.Fatalf("expected no remediation items, got %#v", manifest.RemediationQueue)
+	}
+	outputInfo, err := os.Stat(output)
+	if err != nil {
+		t.Fatalf("compiled package output should exist: %v", err)
+	}
+	if got := outputInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("expected output permissions to remain %04o, got %04o", 0o700, got)
 	}
 }
 

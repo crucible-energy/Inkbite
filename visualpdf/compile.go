@@ -397,15 +397,13 @@ func createStagingOutputDirectory(output string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create visual PDF staging directory: %w", err)
 	}
-	if err := os.Chmod(staging, 0o755); err != nil {
-		_ = os.RemoveAll(staging)
-		return "", fmt.Errorf("set visual PDF staging directory permissions: %w", err)
-	}
 	return staging, nil
 }
 
 func publishOutputDirectory(staging, output string) error {
+	var publishedMode os.FileMode
 	if info, err := os.Lstat(output); err == nil {
+		publishedMode = info.Mode().Perm()
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("visual PDF output changed before publish: %s", output)
 		}
@@ -424,6 +422,11 @@ func publishOutputDirectory(staging, output string) error {
 	}
 	if err := os.Rename(staging, output); err != nil {
 		return fmt.Errorf("publish visual PDF output: %w", err)
+	}
+	if publishedMode != 0 {
+		if err := os.Chmod(output, publishedMode); err != nil {
+			return fmt.Errorf("set visual PDF output permissions: %w", err)
+		}
 	}
 	return nil
 }
