@@ -320,6 +320,42 @@ func TestCompileUsesVerifiedReferenceAsRasterFallback(t *testing.T) {
 	}
 }
 
+func TestComparePNGRecordsRawDifferenceEvidence(t *testing.T) {
+	root := t.TempDir()
+	referencePath := filepath.Join(root, "reference.png")
+	renderedPath := filepath.Join(root, "rendered.png")
+	referenceImage := image.NewRGBA(image.Rect(0, 0, 3, 2))
+	renderedImage := image.NewRGBA(image.Rect(0, 0, 3, 2))
+	referenceImage.Set(1, 0, color.RGBA{R: 10, G: 20, B: 30, A: 255})
+	renderedImage.Set(1, 0, color.RGBA{R: 11, G: 20, B: 30, A: 255})
+	referenceImage.Set(2, 1, color.RGBA{R: 40, G: 50, B: 60, A: 255})
+	renderedImage.Set(2, 1, color.RGBA{R: 40, G: 50, B: 61, A: 255})
+	writePNG(t, referencePath, referenceImage)
+	writePNG(t, renderedPath, renderedImage)
+	reference, err := artifactFor(root, referencePath, "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := artifactFor(root, renderedPath, "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	comparison, err := comparePNG(reference, &rendered, root, CalibrationEvidence{
+		Thresholds: CalibrationThresholds{MaxChannelDelta: 0, MaxChangedPixels: 2},
+	})
+
+	if err != nil {
+		t.Fatalf("comparePNG() error = %v", err)
+	}
+	if !comparison.passed || comparison.maxDelta != 1 || comparison.changedPixels != 2 || comparison.differentPixels != 2 {
+		t.Fatalf("unexpected comparison: %#v", comparison)
+	}
+	if comparison.differenceBounds == nil || *comparison.differenceBounds != (DifferenceBounds{XMin: 1, YMin: 0, XMax: 3, YMax: 2}) {
+		t.Fatalf("difference bounds = %#v", comparison.differenceBounds)
+	}
+}
+
 func TestProfileAndSVGValidationFailClosed(t *testing.T) {
 	if err := validateProfiles([]VisualProfile{{ID: "missing", Version: "1", ReferenceDPI: 72, Renderer: SVGRenderer{Path: "/renderer", Version: "1", Arguments: []string{"{input}", "{output}"}}}}); err == nil {
 		t.Fatal("expected missing calibration to fail")
@@ -756,13 +792,18 @@ func grayRasterPDF(width, height int, pixels []byte) []byte {
 
 func writeFixturePNG(t *testing.T, path string) {
 	t.Helper()
+	pixels := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	pixels.Set(0, 0, color.RGBA{R: 10, G: 20, B: 30, A: 255})
+	writePNG(t, path, pixels)
+}
+
+func writePNG(t *testing.T, path string, pixels image.Image) {
+	t.Helper()
 	file, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	pixels := image.NewRGBA(image.Rect(0, 0, 1, 1))
-	pixels.Set(0, 0, color.RGBA{R: 10, G: 20, B: 30, A: 255})
 	if err := png.Encode(file, pixels); err != nil {
 		t.Fatal(err)
 	}
