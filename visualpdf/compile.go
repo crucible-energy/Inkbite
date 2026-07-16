@@ -401,6 +401,10 @@ func createStagingOutputDirectory(output string) (string, error) {
 }
 
 func publishOutputDirectory(staging, output string) error {
+	return publishOutputDirectoryWithRename(staging, output, os.Rename)
+}
+
+func publishOutputDirectoryWithRename(staging, output string, rename func(string, string) error) error {
 	var publishedMode os.FileMode
 	if info, err := os.Lstat(output); err == nil {
 		publishedMode = info.Mode().Perm()
@@ -420,7 +424,16 @@ func publishOutputDirectory(staging, output string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect visual PDF output before publish: %w", err)
 	}
-	if err := os.Rename(staging, output); err != nil {
+	if err := rename(staging, output); err != nil {
+		if publishedMode != 0 {
+			restoreErr := os.Mkdir(output, publishedMode)
+			if restoreErr == nil {
+				restoreErr = os.Chmod(output, publishedMode)
+			}
+			if restoreErr != nil && !errors.Is(restoreErr, os.ErrExist) {
+				return fmt.Errorf("publish visual PDF output: %w; restore output directory: %v", err, restoreErr)
+			}
+		}
 		return fmt.Errorf("publish visual PDF output: %w", err)
 	}
 	if publishedMode == 0 {

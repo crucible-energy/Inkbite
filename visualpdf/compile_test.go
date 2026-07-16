@@ -175,6 +175,34 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	}
 }
 
+func TestPublishOutputDirectoryRestoresExistingOutputOnRenameFailure(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, "staging")
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "package")
+	if err := os.Mkdir(output, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := publishOutputDirectoryWithRename(staging, output, func(string, string) error {
+		return fmt.Errorf("injected rename failure")
+	})
+	if err == nil || !strings.Contains(err.Error(), "publish visual PDF output") {
+		t.Fatalf("expected publish failure, got %v", err)
+	}
+	info, err := os.Stat(output)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("existing output directory was not restored: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("expected restored output permissions %04o, got %04o", 0o700, got)
+	}
+	if _, err := os.Stat(staging); err != nil {
+		t.Fatalf("staging directory was removed after failed publish: %v", err)
+	}
+}
+
 func TestCompileFailureLeavesExistingOutputUntouched(t *testing.T) {
 	root := t.TempDir()
 	fixturePNG := filepath.Join(root, "fixture.png")
