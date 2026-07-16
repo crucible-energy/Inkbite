@@ -118,6 +118,63 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	}
 }
 
+func TestCompileDefaultsModeWhenOutputDoesNotExist(t *testing.T) {
+	root := t.TempDir()
+	fixturePNG := filepath.Join(root, "fixture.png")
+	writeFixturePNG(t, fixturePNG)
+	t.Setenv("FAKE_PNG", fixturePNG)
+	tools := filepath.Join(root, "tools")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fixtureData, err := os.ReadFile(fixturePNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_PNG_BASE64", base64.StdEncoding.EncodeToString(fixtureData))
+	writeTool(t, tools, "pdfinfo", `
+if [ "$1" = "-v" ]; then echo "pdfinfo version 1.2.3"; exit 0; fi
+case " $* " in *" -f "*) echo "Page size: 72 x 72 pts";; *) echo "Pages: 1";; esac
+`)
+	writeTool(t, tools, "pdftotext", `
+if [ "$1" = "-v" ]; then echo "pdftotext version 1.2.3"; exit 0; fi
+case " $* " in *" -bbox "*) echo '<?xml version="1.0"?><doc><word xMin="1" yMin="2" xMax="3" yMax="4">Source text</word></doc>';; *) echo 'Source text';; esac
+`)
+	writeTool(t, tools, "pdftocairo", `
+if [ "$1" = "-v" ]; then echo "pdftocairo version 1.2.3"; exit 0; fi
+last=""
+for value in "$@"; do last="$value"; done
+case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>' > "$last";; *) cp "$FAKE_PNG" "${last}.png";; esac
+`)
+	renderer := filepath.Join(root, "renderer")
+	if err := os.WriteFile(renderer, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'renderer 9'; exit 0; fi\ncp \"$FAKE_PNG\" \"$4\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(root, "source.pdf")
+	writeValidPDF(t, input)
+	output := filepath.Join(root, "package")
+	if _, err := Compile(context.Background(), CompileOptions{
+		InputPath:       input,
+		OutputDirectory: output,
+		Toolchain:       Toolchain{Directory: tools, Version: "1.2.3"},
+		Profiles: []VisualProfile{{
+			ID: "fixture", Version: "1", ReferenceDPI: 72,
+			Renderer:    SVGRenderer{Path: renderer, Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}},
+			Calibration: fixtureCalibration(t, root),
+		}},
+		CompilerVersion: "test",
+	}); err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	info, err := os.Stat(output)
+	if err != nil {
+		t.Fatalf("compiled package output should exist: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("expected output permissions %04o for newly created output, got %04o", 0o755, got)
+	}
+}
+
 func TestCompileFailureLeavesExistingOutputUntouched(t *testing.T) {
 	root := t.TempDir()
 	fixturePNG := filepath.Join(root, "fixture.png")

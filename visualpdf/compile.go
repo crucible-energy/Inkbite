@@ -423,10 +423,11 @@ func publishOutputDirectory(staging, output string) error {
 	if err := os.Rename(staging, output); err != nil {
 		return fmt.Errorf("publish visual PDF output: %w", err)
 	}
-	if publishedMode != 0 {
-		if err := os.Chmod(output, publishedMode); err != nil {
-			return fmt.Errorf("set visual PDF output permissions: %w", err)
-		}
+	if publishedMode == 0 {
+		publishedMode = 0o755
+	}
+	if err := os.Chmod(output, publishedMode); err != nil {
+		return fmt.Errorf("set visual PDF output permissions: %w", err)
 	}
 	return nil
 }
