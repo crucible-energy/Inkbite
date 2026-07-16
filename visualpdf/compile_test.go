@@ -56,6 +56,9 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	input := filepath.Join(root, "source.pdf")
 	writeValidPDF(t, input)
 	output := filepath.Join(root, "package")
+	if err := os.Mkdir(output, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	subsetter := filepath.Join(root, "woff2-subsetter")
 	writeTool(t, root, "woff2-subsetter", `if [ "$1" = "--version" ]; then echo "woff2-subsetter 1.0"; exit 0; fi; exit 1`)
 	manifest, err := Compile(context.Background(), CompileOptions{
@@ -105,6 +108,183 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	}
 	if len(manifest.RemediationQueue) != 0 {
 		t.Fatalf("expected no remediation items, got %#v", manifest.RemediationQueue)
+	}
+	outputInfo, err := os.Stat(output)
+	if err != nil {
+		t.Fatalf("compiled package output should exist: %v", err)
+	}
+	if got := outputInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("expected output permissions to remain %04o, got %04o", 0o700, got)
+	}
+}
+
+func TestCompileDefaultsModeWhenOutputDoesNotExist(t *testing.T) {
+	root := t.TempDir()
+	fixturePNG := filepath.Join(root, "fixture.png")
+	writeFixturePNG(t, fixturePNG)
+	t.Setenv("FAKE_PNG", fixturePNG)
+	tools := filepath.Join(root, "tools")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fixtureData, err := os.ReadFile(fixturePNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_PNG_BASE64", base64.StdEncoding.EncodeToString(fixtureData))
+	writeTool(t, tools, "pdfinfo", `
+if [ "$1" = "-v" ]; then echo "pdfinfo version 1.2.3"; exit 0; fi
+case " $* " in *" -f "*) echo "Page size: 72 x 72 pts";; *) echo "Pages: 1";; esac
+`)
+	writeTool(t, tools, "pdftotext", `
+if [ "$1" = "-v" ]; then echo "pdftotext version 1.2.3"; exit 0; fi
+case " $* " in *" -bbox "*) echo '<?xml version="1.0"?><doc><word xMin="1" yMin="2" xMax="3" yMax="4">Source text</word></doc>';; *) echo 'Source text';; esac
+`)
+	writeTool(t, tools, "pdftocairo", `
+if [ "$1" = "-v" ]; then echo "pdftocairo version 1.2.3"; exit 0; fi
+last=""
+for value in "$@"; do last="$value"; done
+case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>' > "$last";; *) cp "$FAKE_PNG" "${last}.png";; esac
+`)
+	renderer := filepath.Join(root, "renderer")
+	if err := os.WriteFile(renderer, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'renderer 9'; exit 0; fi\ncp \"$FAKE_PNG\" \"$4\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(root, "source.pdf")
+	writeValidPDF(t, input)
+	output := filepath.Join(root, "package")
+	if _, err := Compile(context.Background(), CompileOptions{
+		InputPath:       input,
+		OutputDirectory: output,
+		Toolchain:       Toolchain{Directory: tools, Version: "1.2.3"},
+		Profiles: []VisualProfile{{
+			ID: "fixture", Version: "1", ReferenceDPI: 72,
+			Renderer:    SVGRenderer{Path: renderer, Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}},
+			Calibration: fixtureCalibration(t, root),
+		}},
+		CompilerVersion: "test",
+	}); err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	info, err := os.Stat(output)
+	if err != nil {
+		t.Fatalf("compiled package output should exist: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("expected output permissions %04o for newly created output, got %04o", 0o755, got)
+	}
+}
+
+func TestPublishOutputDirectoryRestoresExistingOutputOnRenameFailure(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, "staging")
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "package")
+	if err := os.Mkdir(output, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := publishOutputDirectoryWithRename(staging, output, func(string, string) error {
+		return fmt.Errorf("injected rename failure")
+	})
+	if err == nil || !strings.Contains(err.Error(), "publish visual PDF output") {
+		t.Fatalf("expected publish failure, got %v", err)
+	}
+	info, err := os.Stat(output)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("existing output directory was not restored: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("expected restored output permissions %04o, got %04o", 0o700, got)
+	}
+	if _, err := os.Stat(staging); err != nil {
+		t.Fatalf("staging directory was removed after failed publish: %v", err)
+	}
+}
+
+func TestCompileFailureLeavesExistingOutputUntouched(t *testing.T) {
+	root := t.TempDir()
+	fixturePNG := filepath.Join(root, "fixture.png")
+	writeFixturePNG(t, fixturePNG)
+	t.Setenv("FAKE_PNG", fixturePNG)
+	tools := filepath.Join(root, "tools")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTool(t, tools, "pdfinfo", `if [ "$1" = "-v" ]; then echo "pdfinfo version 1.2.3"; elif [ "$1" = "-f" ]; then echo "Page size: 72 x 72 pts"; else echo "Pages: 1"; fi`)
+	writeTool(t, tools, "pdftotext", `if [ "$1" = "-v" ]; then echo "pdftotext version 1.2.3"; elif echo " $* " | grep -q " -bbox "; then echo '<doc/>'; else echo 'Source'; fi`)
+	writeTool(t, tools, "pdftocairo", `if [ "$1" = "-v" ]; then echo "pdftocairo version 1.2.3"; exit 0; fi; case " $* " in *" -svg "*) exit 1;; esac; for value in "$@"; do last="$value"; done; cp "$FAKE_PNG" "${last}.png"`)
+	input := filepath.Join(root, "source.pdf")
+	writeValidPDF(t, input)
+	output := filepath.Join(root, "package")
+	if err := os.Mkdir(output, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Compile(context.Background(), CompileOptions{
+		InputPath: input, OutputDirectory: output, Toolchain: Toolchain{Directory: tools, Version: "1.2.3"},
+		Profiles: []VisualProfile{{ID: "fixture", Version: "1", ReferenceDPI: 72, Renderer: SVGRenderer{Path: filepath.Join(root, "renderer"), Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}}, Calibration: fixtureCalibration(t, root)}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "emit Poppler/Cairo") {
+		t.Fatalf("expected outlined SVG failure, got %v", err)
+	}
+	entries, err := os.ReadDir(output)
+	if err != nil {
+		t.Fatalf("existing output directory was removed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("existing output directory contains partial package files: %#v", entries)
+	}
+	staging, err := filepath.Glob(filepath.Join(root, ".package.tmp-*"))
+	if err != nil || len(staging) != 0 {
+		t.Fatalf("staging directories remain after failure: %v, %v", staging, err)
+	}
+}
+
+func TestCompileRejectsOutputSymlink(t *testing.T) {
+	root := t.TempDir()
+	fixturePNG := filepath.Join(root, "fixture.png")
+	writeFixturePNG(t, fixturePNG)
+	t.Setenv("FAKE_PNG", fixturePNG)
+	tools := filepath.Join(root, "tools")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTool(t, tools, "pdfinfo", `if [ "$1" = "-v" ]; then echo "pdfinfo version 1.2.3"; else echo "Pages: 1"; fi`)
+	writeTool(t, tools, "pdftotext", `if [ "$1" = "-v" ]; then echo "pdftotext version 1.2.3"; fi`)
+	writeTool(t, tools, "pdftocairo", `if [ "$1" = "-v" ]; then echo "pdftocairo version 1.2.3"; fi`)
+	input := filepath.Join(root, "source.pdf")
+	writeValidPDF(t, input)
+	realOutput := filepath.Join(root, "package")
+	if err := os.Mkdir(realOutput, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(root, "package-link")
+	if err := os.Symlink(realOutput, symlink); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Compile(context.Background(), CompileOptions{
+		InputPath:       input,
+		OutputDirectory: symlink,
+		Toolchain:       Toolchain{Directory: tools, Version: "1.2.3"},
+		Profiles: []VisualProfile{{
+			ID: "fixture", Version: "1", ReferenceDPI: 72,
+			Renderer:    SVGRenderer{Path: filepath.Join(root, "renderer"), Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}},
+			Calibration: fixtureCalibration(t, root),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("expected symlink output rejection, got %v", err)
+	}
+	entries, err := os.ReadDir(realOutput)
+	if err != nil {
+		t.Fatalf("existing output target read failed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("symlink target must remain untouched, got entries: %#v", entries)
+	}
+	if _, err := os.Stat(symlink); err != nil {
+		t.Fatalf("symlink output path should still exist: %v", err)
 	}
 }
 
@@ -293,6 +473,26 @@ func TestLoadProfileSetPinsCalibrationEvidence(t *testing.T) {
 	}
 	if _, err := LoadProfileSet(profilePath); err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("expected escaped calibration report rejection, got %v", err)
+	}
+	profileSet.Profiles[0].Calibration.Report = "calibration.md"
+	data, err = json.Marshal(profileSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["unexpected"] = json.RawMessage(`true`)
+	data, err = json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profilePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProfileSet(profilePath); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("expected unknown profile field rejection, got %v", err)
 	}
 }
 

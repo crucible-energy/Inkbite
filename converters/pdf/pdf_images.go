@@ -45,18 +45,18 @@ type RasterPlacement struct {
 // as separate assets. Unsupported image encodings or mask forms fail closed.
 func ExtractPageRasterAssets(document []byte, pageNumber int) ([]RasterAsset, error) {
 	if pageNumber <= 0 {
-		return nil, fmt.Errorf("PDF page number must be positive")
+		return nil, fmt.Errorf("pdf page number must be positive")
 	}
 	reader, err := pdf.NewReader(bytes.NewReader(document), int64(len(document)))
 	if err != nil {
 		return nil, err
 	}
 	if pageNumber > reader.NumPage() {
-		return nil, fmt.Errorf("PDF page %d is unavailable", pageNumber)
+		return nil, fmt.Errorf("pdf page %d is unavailable", pageNumber)
 	}
 	page := reader.Page(pageNumber)
 	if page.V.IsNull() {
-		return nil, fmt.Errorf("PDF page %d is null", pageNumber)
+		return nil, fmt.Errorf("pdf page %d is null", pageNumber)
 	}
 	return pageRasterAssets(page)
 }
@@ -135,10 +135,10 @@ func paintedImageXObjects(page pdf.Page) ([]paintedImageXObject, error) {
 
 func (extractor *rasterPlacementExtractor) extract(resources, contents pdf.Value, path []string, initial RasterPlacement, depth int) (err error) {
 	if depth > maxFormXObjectDepth {
-		return fmt.Errorf("Form XObject nesting exceeds %d", maxFormXObjectDepth)
+		return fmt.Errorf("form xobject nesting exceeds %d", maxFormXObjectDepth)
 	}
 	if resources.Kind() != pdf.Dict {
-		return fmt.Errorf("XObject resources are missing or malformed")
+		return fmt.Errorf("xobject resources are missing or malformed")
 	}
 	current := initial
 	var stack []RasterPlacement
@@ -163,7 +163,7 @@ func (extractor *rasterPlacementExtractor) extract(resources, contents pdf.Value
 				stack = append(stack, current)
 			case "Q":
 				if len(arguments) != 0 {
-					err = fmt.Errorf("Q has %d arguments", len(arguments))
+					err = fmt.Errorf("q restore has %d arguments", len(arguments))
 					return
 				}
 				if len(stack) == 0 {
@@ -181,13 +181,13 @@ func (extractor *rasterPlacementExtractor) extract(resources, contents pdf.Value
 				current = composeRasterPlacements(matrix, current)
 			case "Do":
 				if len(arguments) != 1 || arguments[0].Kind() != pdf.Name || arguments[0].Name() == "" {
-					err = fmt.Errorf("Do has invalid XObject name")
+					err = fmt.Errorf("do has invalid xobject name")
 					return
 				}
 				name := arguments[0].Name()
 				xobject := resources.Key("XObject").Key(name)
 				if xobject.IsNull() {
-					err = fmt.Errorf("painted XObject %s is missing from resources", name)
+					err = fmt.Errorf("painted xobject %s is missing from resources", name)
 					return
 				}
 				qualifiedName := strings.Join(append(append([]string{}, path...), name), "/")
@@ -203,7 +203,7 @@ func (extractor *rasterPlacementExtractor) extract(resources, contents pdf.Value
 				case "Form":
 					matrix, matrixErr := formXObjectMatrix(xobject)
 					if matrixErr != nil {
-						err = fmt.Errorf("Form XObject %s: %w", qualifiedName, matrixErr)
+						err = fmt.Errorf("form xobject %s: %w", qualifiedName, matrixErr)
 						return
 					}
 					if formErr := extractor.extract(xobject.Key("Resources"), xobject, append(path, name), composeRasterPlacements(matrix, current), depth+1); formErr != nil {
@@ -229,7 +229,7 @@ func formXObjectMatrix(xobject pdf.Value) (RasterPlacement, error) {
 		return identityRasterPlacement(), nil
 	}
 	if matrix.Kind() != pdf.Array {
-		return RasterPlacement{}, fmt.Errorf("Matrix is not an array")
+		return RasterPlacement{}, fmt.Errorf("matrix is not an array")
 	}
 	arguments := make([]pdf.Value, matrix.Len())
 	for index := range arguments {
@@ -607,7 +607,10 @@ func rasterSamplesImage(raw []byte, colorSpace pdf.Value, width int, height int,
 		if bitsPerComponent != 8 {
 			return nil, fmt.Errorf("unsupported grayscale PDF image bits-per-component %d", bitsPerComponent)
 		}
-		expected := width * height
+		expected, err := rasterByteCount(width, height, 1)
+		if err != nil {
+			return nil, err
+		}
 		if len(raw) < expected {
 			return nil, fmt.Errorf("truncated grayscale PDF image data: got %d bytes want %d", len(raw), expected)
 		}
@@ -618,7 +621,10 @@ func rasterSamplesImage(raw []byte, colorSpace pdf.Value, width int, height int,
 		if bitsPerComponent != 8 {
 			return nil, fmt.Errorf("unsupported RGB PDF image bits-per-component %d", bitsPerComponent)
 		}
-		expected := width * height * 3
+		expected, err := rasterByteCount(width, height, 3)
+		if err != nil {
+			return nil, err
+		}
 		if len(raw) < expected {
 			return nil, fmt.Errorf("truncated RGB PDF image data: got %d bytes want %d", len(raw), expected)
 		}
@@ -640,7 +646,10 @@ func rasterSamplesImage(raw []byte, colorSpace pdf.Value, width int, height int,
 		if err != nil {
 			return nil, err
 		}
-		expected := width * height
+		expected, err := rasterByteCount(width, height, 1)
+		if err != nil {
+			return nil, err
+		}
 		if len(raw) < expected {
 			return nil, fmt.Errorf("truncated indexed PDF image data: got %d bytes want %d", len(raw), expected)
 		}
@@ -650,6 +659,17 @@ func rasterSamplesImage(raw []byte, colorSpace pdf.Value, width int, height int,
 	default:
 		return nil, fmt.Errorf("unsupported PDF image colorspace %q", colorSpaceName(colorSpace))
 	}
+}
+
+func rasterByteCount(width, height, channels int) (int, error) {
+	if width <= 0 || height <= 0 || channels <= 0 {
+		return 0, fmt.Errorf("invalid pdf raster dimensions %dx%d", width, height)
+	}
+	maxInt := int(^uint(0) >> 1)
+	if width > maxInt/height || width*height > maxInt/channels {
+		return 0, fmt.Errorf("pdf raster dimensions %dx%d overflow byte count", width, height)
+	}
+	return width * height * channels, nil
 }
 
 type maskOrImageReader struct {
@@ -741,28 +761,28 @@ func lookupBytes(value pdf.Value) ([]byte, error) {
 	}
 }
 
-func packBitmapToPNG(raw []byte, width int, height int) ([]byte, error) {
-	img, err := packBitmapImage(raw, width, height, false)
-	if err != nil {
-		return nil, err
-	}
-	return encodePNG(img)
-}
-
 func packBitmapImage(raw []byte, width int, height int, invert bool) (*image.Gray, error) {
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("invalid pdf bitmap dimensions %dx%d", width, height)
+	}
+	rowBytes := width / 8
+	if width%8 != 0 {
+		rowBytes++
+	}
+	maxInt := int(^uint(0) >> 1)
+	if rowBytes > maxInt/height {
+		return nil, fmt.Errorf("pdf bitmap dimensions %dx%d overflow byte count", width, height)
+	}
+	expected := rowBytes * height
+	if len(raw) < expected {
+		return nil, fmt.Errorf("truncated pdf bitmap data: got %d bytes want %d", len(raw), expected)
+	}
 	img := image.NewGray(image.Rect(0, 0, width, height))
-	rowBytes := (width + 7) / 8
 	for y := 0; y < height; y++ {
-		if y*rowBytes >= len(raw) {
-			break
-		}
-		row := raw[y*rowBytes:]
+		row := raw[y*rowBytes : (y+1)*rowBytes]
 		for x := 0; x < width; x++ {
 			byteIndex := x / 8
 			bitIndex := uint(7 - (x % 8))
-			if byteIndex >= len(row) {
-				break
-			}
 			bit := (row[byteIndex] >> bitIndex) & 1
 			if invert {
 				bit ^= 1

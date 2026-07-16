@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image/png"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +23,16 @@ func TestExtractPageRasterAssetsPreservesOriginalJPEGBytes(t *testing.T) {
 	}
 	if !bytes.Contains(document, asset.Bytes) {
 		t.Fatal("JPEG asset bytes were not preserved from the PDF stream")
+	}
+}
+
+func TestPackBitmapImageRejectsTruncatedAndOverflowedInput(t *testing.T) {
+	if _, err := packBitmapImage([]byte{0x00}, 9, 1, false); err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("expected truncated bitmap rejection, got %v", err)
+	}
+	maxInt := int(^uint(0) >> 1)
+	if _, err := rasterByteCount(maxInt, 2, 1); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("expected raster byte-count overflow rejection, got %v", err)
 	}
 }
 

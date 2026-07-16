@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/LynnColeArt/Inkbite/internal/normalize"
@@ -14,8 +15,9 @@ import (
 
 // Engine coordinates source handling, stream typing, and converter dispatch.
 type Engine struct {
-	converters []Converter
-	httpClient *http.Client
+	convertersMu sync.RWMutex
+	converters   []Converter
+	httpClient   *http.Client
 }
 
 // New creates a new engine with default configuration.
@@ -39,12 +41,16 @@ func (e *Engine) RegisterConverter(converter Converter) {
 		return
 	}
 
+	e.convertersMu.Lock()
+	defer e.convertersMu.Unlock()
 	e.converters = append(e.converters, converter)
 }
 
 // RegisteredConverters returns a snapshot of the registry sorted by priority.
 func (e *Engine) RegisteredConverters() []Converter {
+	e.convertersMu.RLock()
 	registered := slices.Clone(e.converters)
+	e.convertersMu.RUnlock()
 	sort.SliceStable(registered, func(i, j int) bool {
 		return registered[i].Priority() < registered[j].Priority()
 	})

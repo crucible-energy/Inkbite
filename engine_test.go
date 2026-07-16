@@ -2,8 +2,10 @@ package inkbite
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -63,5 +65,32 @@ func TestEngineReturnsUnsupportedFormat(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported format") {
 		t.Fatalf("expected unsupported format error, got %v", err)
+	}
+}
+
+func TestEngineRegistrySupportsConcurrentSnapshots(t *testing.T) {
+	engine := New()
+	const registrations = 128
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	group.Add(2)
+	go func() {
+		defer group.Done()
+		<-start
+		for index := 0; index < registrations; index++ {
+			engine.RegisterConverter(stubConverter{name: fmt.Sprintf("converter-%d", index)})
+		}
+	}()
+	go func() {
+		defer group.Done()
+		<-start
+		for index := 0; index < registrations; index++ {
+			_ = engine.RegisteredConverters()
+		}
+	}()
+	close(start)
+	group.Wait()
+	if got := len(engine.RegisteredConverters()); got != registrations {
+		t.Fatalf("registered converter count = %d, want %d", got, registrations)
 	}
 }

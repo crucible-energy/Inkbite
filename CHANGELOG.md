@@ -55,3 +55,8 @@ The format is intentionally lightweight at the current stage of the project.
 - Visual-PDF SVG validation now parses the document and rejects every event
   attribute, processing instruction, XML directive, stylesheet import, and
   unlisted resource reference
+- Visual-PDF compilation now stages output and publishes it only after the
+  manifest is complete; malformed profile contracts and truncated raster data
+  fail closed without leaving a partial package
+- converter-registry snapshots are synchronized for concurrent registration
+  and conversion
