@@ -232,15 +232,15 @@ inkbite visual pdf \
   --poppler-version 26.07.0 \
   --woff2-subsetter /pinned/woff2-subsetter \
   --woff2-subsetter-version 1.0.0 \
-  --profiles ./visualpdf/profiles/iris-offline-webview-v2.json
+  --profiles ./visualpdf/profiles/iris-offline-webview-v3.json
 ```
 
-The checked-in profile is intentionally unqualified: its renderer path is a
-placeholder and therefore fails closed until an application supplies a
-qualified offline-WebView renderer, device/corpus evidence, and reviewed
-calibration report. The compiler writes `manifest.json` with source and asset
-hashes, dimensions, candidates, verification evidence, semantic artifacts,
-and remediation queue.
+The checked-in profile is intentionally unqualified: its review state is not
+approved and its renderer path is a placeholder. It therefore fails closed
+until an application supplies a qualified offline-WebView renderer,
+device/corpus evidence, and an approved reviewed calibration report. The
+compiler writes `manifest.json` with source and asset hashes, dimensions,
+candidates, verification evidence, semantic artifacts, and remediation queue.
 
 The optional subsetter is an explicitly pinned wrapper, not an inferred host
 dependency. It must print its configured version for `--version` and accept

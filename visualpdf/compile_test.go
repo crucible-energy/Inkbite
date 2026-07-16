@@ -562,8 +562,11 @@ func TestLoadProfileSetPinsCalibrationEvidence(t *testing.T) {
 		SchemaVersion: ProfileSetSchemaVersion,
 		Profiles: []VisualProfile{{
 			ID: "fixture", Version: "1", ReferenceDPI: 72,
-			Renderer:    SVGRenderer{Path: "/qualified/renderer", Version: "fixture", Arguments: []string{"{input}", "{output}"}},
-			Calibration: Calibration{CorpusID: "fixture", Report: "calibration.md", ReportSHA256: hash},
+			Renderer: SVGRenderer{Path: "/qualified/renderer", Version: "fixture", Arguments: []string{"{input}", "{output}"}},
+			Calibration: Calibration{
+				CorpusID: "fixture", Report: "calibration.md", ReportSHA256: hash,
+				Review: CalibrationReview{Outcome: "approved", ReviewedAt: "2026-07-15T00:00:00Z", ReviewedBy: "fixture reviewer"},
+			},
 		}},
 	}
 	data, err := json.Marshal(profileSet)
@@ -584,6 +587,49 @@ func TestLoadProfileSetPinsCalibrationEvidence(t *testing.T) {
 	}
 	if loaded.Profiles[0].Calibration.reportPath != resolvedCalibrationPath {
 		t.Fatalf("calibration report path = %q, want %q", loaded.Profiles[0].Calibration.reportPath, resolvedCalibrationPath)
+	}
+	profileSet.Profiles[0].Calibration.Review.Outcome = "pending"
+	data, err = json.Marshal(profileSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profilePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProfileSet(profilePath); err == nil || !strings.Contains(err.Error(), "calibration review must be approved") {
+		t.Fatalf("expected unapproved calibration rejection, got %v", err)
+	}
+	profileSet.Profiles[0].Calibration.Review.Outcome = "approved"
+	profileSet.Profiles[0].Calibration.Review.ReviewedBy = ""
+	data, err = json.Marshal(profileSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profilePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProfileSet(profilePath); err == nil || !strings.Contains(err.Error(), "needs reviewed_by") {
+		t.Fatalf("expected missing reviewer rejection, got %v", err)
+	}
+	profileSet.Profiles[0].Calibration.Review.ReviewedBy = "fixture reviewer"
+	profileSet.Profiles[0].Calibration.Review.ReviewedAt = "not-a-time"
+	data, err = json.Marshal(profileSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profilePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProfileSet(profilePath); err == nil || !strings.Contains(err.Error(), "invalid reviewed_at") {
+		t.Fatalf("expected invalid review time rejection, got %v", err)
+	}
+	profileSet.Profiles[0].Calibration.Review.ReviewedAt = "2026-07-15T00:00:00Z"
+	data, err = json.Marshal(profileSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profilePath, data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(calibrationPath, []byte("tampered evidence\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -629,9 +675,9 @@ func TestLoadProfileSetPinsCalibrationEvidence(t *testing.T) {
 	}
 }
 
-func TestCheckedInProfilePinsItsCalibrationReport(t *testing.T) {
-	if _, err := LoadProfileSet(filepath.Join("profiles", "iris-offline-webview-v2.json")); err != nil {
-		t.Fatalf("checked-in profile must load: %v", err)
+func TestCheckedInProfileRefusesUnapprovedCalibration(t *testing.T) {
+	if _, err := LoadProfileSet(filepath.Join("profiles", "iris-offline-webview-v3.json")); err == nil || !strings.Contains(err.Error(), "calibration review must be approved") {
+		t.Fatalf("expected checked-in profile to refuse unapproved calibration, got %v", err)
 	}
 }
 
@@ -866,7 +912,10 @@ func fixtureCalibration(t *testing.T, root string) Calibration {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Calibration{CorpusID: "fixture-corpus", Report: path, ReportSHA256: hash}
+	return Calibration{
+		CorpusID: "fixture-corpus", Report: path, ReportSHA256: hash,
+		Review: CalibrationReview{Outcome: "approved", ReviewedAt: "2026-07-15T00:00:00Z", ReviewedBy: "fixture reviewer"},
+	}
 }
 
 func writeValidPDF(t *testing.T, destination string) {

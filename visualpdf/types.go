@@ -12,7 +12,7 @@ const (
 	// ManifestSchemaVersion is the version of the emitted visual package manifest.
 	ManifestSchemaVersion = "inkbite.visualpdf.manifest.v3"
 	// ProfileSetSchemaVersion is the version of a visual profile set document.
-	ProfileSetSchemaVersion = "inkbite.visualpdf.profiles.v2"
+	ProfileSetSchemaVersion = "inkbite.visualpdf.profiles.v3"
 )
 
 // Toolchain identifies the build-time Poppler installation. Directory must be
@@ -47,12 +47,22 @@ type SVGRenderer struct {
 // Calibration names the committed calibration evidence that supplied a
 // profile's numeric visual tolerance. The compiler never invents tolerances.
 type Calibration struct {
-	CorpusID         string `json:"corpus_id"`
-	Report           string `json:"report"`
-	ReportSHA256     string `json:"report_sha256"`
-	MaxChannelDelta  uint8  `json:"max_channel_delta"`
-	MaxChangedPixels int    `json:"max_changed_pixels"`
+	CorpusID         string            `json:"corpus_id"`
+	Report           string            `json:"report"`
+	ReportSHA256     string            `json:"report_sha256"`
+	Review           CalibrationReview `json:"review"`
+	MaxChannelDelta  uint8             `json:"max_channel_delta"`
+	MaxChangedPixels int               `json:"max_changed_pixels"`
 	reportPath       string
+}
+
+// CalibrationReview makes the human approval needed to use a calibration
+// profile explicit and durable. A hash pins the report bytes; this review
+// records whether those bytes are approved for visual verification.
+type CalibrationReview struct {
+	Outcome    string `json:"outcome"`
+	ReviewedAt string `json:"reviewed_at"`
+	ReviewedBy string `json:"reviewed_by"`
 }
 
 // VisualProfile defines one deterministic reference render and matching SVG

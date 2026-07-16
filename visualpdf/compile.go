@@ -230,6 +230,15 @@ func validateProfiles(profiles []VisualProfile) error {
 		if !isSHA256Digest(profile.Calibration.ReportSHA256) {
 			return fmt.Errorf("visual profile %q needs a lowercase SHA-256 calibration report hash", id)
 		}
+		if profile.Calibration.Review.Outcome != "approved" {
+			return fmt.Errorf("visual profile %q calibration review must be approved", id)
+		}
+		if strings.TrimSpace(profile.Calibration.Review.ReviewedBy) == "" {
+			return fmt.Errorf("visual profile %q calibration review needs reviewed_by", id)
+		}
+		if _, err := time.Parse(time.RFC3339, profile.Calibration.Review.ReviewedAt); err != nil {
+			return fmt.Errorf("visual profile %q calibration review has invalid reviewed_at: %w", id, err)
+		}
 		if profile.Calibration.MaxChangedPixels < 0 {
 			return fmt.Errorf("visual profile %q max_changed_pixels cannot be negative", id)
 		}
