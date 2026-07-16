@@ -149,7 +149,7 @@ func Compile(ctx context.Context, options CompileOptions) (Manifest, error) {
 	}
 
 	for page := 1; page <= pageCount; page++ {
-		pageManifest, remediation, err := compilePage(ctx, staging, sourcePath, sourceDocument, tools, options.Profiles, woff2Subsetter != nil, page, pageDimensions[page-1])
+		pageManifest, remediation, err := compilePage(ctx, staging, sourcePath, sourceDocument, tools, options.Profiles, woff2Subsetter, page, pageDimensions[page-1])
 		if err != nil {
 			return Manifest{}, fmt.Errorf("compile page %d: %w", page, err)
 		}
@@ -488,7 +488,7 @@ func compilePage(
 	sourceDocument []byte,
 	tools toolPaths,
 	profiles []VisualProfile,
-	hasWOFF2Subsetter bool,
+	woff2Subsetter *WOFF2Subsetter,
 	page int,
 	dimensions PageDimensions,
 ) (PageManifest, *RemediationItem, error) {
@@ -513,7 +513,7 @@ func compilePage(
 	if err != nil {
 		return PageManifest{}, nil, err
 	}
-	sourceAware := unavailableSourceAwareCandidate(sourceAwareEligibility(sourceDocument, page, hasWOFF2Subsetter))
+	sourceAware := emitSourceAwareCandidate(ctx, output, pageDirectory, outlined, sourceDocument, woff2Subsetter, page, dimensions, profiles, references)
 	candidates := []Candidate{outlined, sourceAware}
 	verified := make([]Candidate, 0, 1)
 	for _, candidate := range candidates {
@@ -683,10 +683,19 @@ func emitOutlinedCandidate(ctx context.Context, pdftocairo, input, output string
 	for _, asset := range referencedAssets {
 		installedBytes += asset.ByteCount
 	}
-	candidate := Candidate{Kind: "outlined_glyph", State: CandidateVerified, SVG: &artifact, ReferencedAssets: referencedAssets, InstalledByteCount: installedBytes, Verification: make([]Verification, 0, len(profiles))}
+	return verifySVGCandidate(ctx, output, pageDirectory, profiles, references, Candidate{Kind: "outlined_glyph", State: CandidateVerified, SVG: &artifact, ReferencedAssets: referencedAssets, InstalledByteCount: installedBytes, Verification: make([]Verification, 0, len(profiles))}), nil
+}
+
+func verifySVGCandidate(ctx context.Context, output, pageDirectory string, profiles []VisualProfile, references []Verification, candidate Candidate) Candidate {
+	if candidate.SVG == nil {
+		candidate.State = CandidateUnavailable
+		candidate.Reason = "SVG candidate has no display asset"
+		return candidate
+	}
+	svgPath := filepath.Join(output, filepath.FromSlash(candidate.SVG.Locator))
 	for index, profile := range profiles {
 		verification := references[index]
-		renderedPath := filepath.Join(pageDirectory, "rendered-"+safeName(profile.ID)+".png")
+		renderedPath := filepath.Join(pageDirectory, "rendered-"+safeName(candidate.Kind)+"-"+safeName(profile.ID)+".png")
 		_, err := renderSVG(ctx, profile, svgPath, renderedPath)
 		if err != nil {
 			verification.Passed = false
@@ -728,7 +737,7 @@ func emitOutlinedCandidate(ctx context.Context, pdftocairo, input, output string
 			}
 		}
 	}
-	return candidate, nil
+	return candidate
 }
 
 func unavailableSourceAwareCandidate(reason string) Candidate {

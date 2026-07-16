@@ -25,7 +25,9 @@ type Toolchain struct {
 
 // WOFF2Subsetter identifies the optional build-time executable that produces
 // source-font subsets. It must support --version and report Version exactly as
-// a substring; without it, source-aware text remains unavailable.
+// a substring, then accept input.ttf, --text-file, --no-ignore-missing-unicodes,
+// --flavor=woff2, and --output-file arguments. Without it, source-aware text
+// remains unavailable.
 type WOFF2Subsetter struct {
 	Path    string `json:"path"`
 	Version string `json:"version"`
