@@ -25,8 +25,10 @@ import (
 func TestCompileEmitsVerifiedPackageWithSourceText(t *testing.T) {
 	root := t.TempDir()
 	fixturePNG := filepath.Join(root, "fixture.png")
-	writeFixturePNG(t, fixturePNG)
+	writeFixturePNGDimensions(t, fixturePNG, 321, 123)
 	t.Setenv("FAKE_PNG", fixturePNG)
+	rendererArguments := filepath.Join(root, "renderer-arguments")
+	t.Setenv("FAKE_RENDERER_ARGUMENTS", rendererArguments)
 	tools := filepath.Join(root, "tools")
 	if err := os.MkdirAll(tools, 0o755); err != nil {
 		t.Fatal(err)
@@ -54,7 +56,7 @@ for value in "$@"; do last="$value"; done
 case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/><image href="data:image/png;base64,%s"/></svg>' "$FAKE_PNG_BASE64" > "$last";; *) cp "$FAKE_PNG" "${last}.png";; esac
 `)
 	renderer := filepath.Join(root, "renderer")
-	if err := os.WriteFile(renderer, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'renderer 9'; exit 0; fi\ncp \"$FAKE_PNG\" \"$4\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(renderer, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'renderer 9'; exit 0; fi\nprintf '%s\\n' \"$*\" > \"$FAKE_RENDERER_ARGUMENTS\"\ncp \"$FAKE_PNG\" \"$4\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	input := filepath.Join(root, "source.pdf")
@@ -72,7 +74,7 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 		WOFF2Subsetter:  &WOFF2Subsetter{Path: subsetter, Version: "1.0"},
 		Profiles: []VisualProfile{{
 			ID: "fixture-webview", Version: "1", ReferenceDPI: 72,
-			Renderer:    SVGRenderer{Path: renderer, Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}"}},
+			Renderer:    SVGRenderer{Path: renderer, Version: "renderer 9", Arguments: []string{"--input", "{input}", "--output", "{output}", "--width", "{width}", "--height", "{height}"}},
 			Calibration: fixtureCalibration(t, root),
 		}},
 		CompilerVersion: "test",
@@ -119,6 +121,13 @@ case " $* " in *" -svg "*) printf '<svg xmlns="http://www.w3.org/2000/svg"><path
 	}
 	if got := outputInfo.Mode().Perm(); got != 0o700 {
 		t.Fatalf("expected output permissions to remain %04o, got %04o", 0o700, got)
+	}
+	rendererInvocation, err := os.ReadFile(rendererArguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rendererInvocation), "--width 321 --height 123") {
+		t.Fatalf("renderer did not receive deterministic reference dimensions: %q", rendererInvocation)
 	}
 }
 
@@ -910,14 +919,22 @@ func grayRasterPDF(width, height int, pixels []byte) []byte {
 }
 
 func writeFixturePNG(t *testing.T, path string) {
+	writeFixturePNGDimensions(t, path, 1, 1)
+}
+
+func writeFixturePNGDimensions(t *testing.T, path string, width, height int) {
 	t.Helper()
 	file, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	pixels := image.NewRGBA(image.Rect(0, 0, 1, 1))
-	pixels.Set(0, 0, color.RGBA{R: 10, G: 20, B: 30, A: 255})
+	pixels := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			pixels.Set(x, y, color.RGBA{R: 10, G: 20, B: 30, A: 255})
+		}
+	}
 	if err := png.Encode(file, pixels); err != nil {
 		t.Fatal(err)
 	}
