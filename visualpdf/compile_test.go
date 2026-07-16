@@ -453,6 +453,46 @@ func TestProfileAndSVGValidationFailClosed(t *testing.T) {
 	}
 }
 
+func TestRenderSVGSubstitutesReferenceDimensions(t *testing.T) {
+	root := t.TempDir()
+	fixturePNG := filepath.Join(root, "fixture.png")
+	writeFixturePNG(t, fixturePNG)
+	argumentsPath := filepath.Join(root, "renderer-arguments")
+	t.Setenv("FAKE_PNG", fixturePNG)
+	t.Setenv("FAKE_RENDERER_ARGUMENTS", argumentsPath)
+	renderer := filepath.Join(root, "renderer")
+	writeTool(t, root, "renderer", `
+if [ "$1" = "--version" ]; then echo "renderer 9"; exit 0; fi
+printf '%s\n' "$*" > "$FAKE_RENDERER_ARGUMENTS"
+cp "$FAKE_PNG" "$4"
+`)
+	input := filepath.Join(root, "input.svg")
+	if err := os.WriteFile(input, []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "output.png")
+	profile := VisualProfile{
+		ID: "fixture", Version: "1", ReferenceDPI: 72,
+		Renderer: SVGRenderer{
+			Path: renderer, Version: "renderer 9",
+			Arguments: []string{"--input", "{input}", "--output", "{output}", "--width", "{width}", "--height", "{height}"},
+		},
+	}
+	if _, err := renderSVG(context.Background(), profile, input, output, 321, 123); err != nil {
+		t.Fatalf("renderSVG() error = %v", err)
+	}
+	arguments, err := os.ReadFile(argumentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(arguments), "--width 321 --height 123") {
+		t.Fatalf("renderer did not receive reference dimensions: %q", arguments)
+	}
+	if _, err := renderSVG(context.Background(), profile, input, output, 0, 123); err == nil {
+		t.Fatal("expected zero reference width to fail")
+	}
+}
+
 func TestValidateSVGRejectsUnlistedCSSResource(t *testing.T) {
 	svg := filepath.Join(t.TempDir(), "unsafe-style.svg")
 	if err := os.WriteFile(svg, []byte(`<svg><style>rect { fill: url(https://example.invalid/fill.svg); }</style></svg>`), 0o644); err != nil {

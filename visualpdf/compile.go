@@ -795,7 +795,16 @@ func verifySVGCandidate(ctx context.Context, output, pageDirectory string, profi
 	for index, profile := range profiles {
 		verification := references[index]
 		renderedPath := filepath.Join(pageDirectory, "rendered-"+safeName(candidate.Kind)+"-"+safeName(profile.ID)+".png")
-		_, err := renderSVG(ctx, profile, svgPath, renderedPath)
+		referencePath := filepath.Join(output, filepath.FromSlash(verification.Reference.Locator))
+		referenceSize, err := inspectPNG(referencePath)
+		if err != nil {
+			verification.Passed = false
+			verification.Reason = fmt.Sprintf("inspect deterministic reference raster: %v", err)
+			candidate.State = CandidateFailed
+			candidate.Verification = append(candidate.Verification, verification)
+			continue
+		}
+		_, err = renderSVG(ctx, profile, svgPath, renderedPath, referenceSize.Width, referenceSize.Height)
 		if err != nil {
 			verification.Passed = false
 			verification.Reason = fmt.Sprintf("offline SVG renderer failed: %v", err)
@@ -854,7 +863,10 @@ func unavailableSourceAwareCandidate(reason string) Candidate {
 	}
 }
 
-func renderSVG(ctx context.Context, profile VisualProfile, input, output string) (string, error) {
+func renderSVG(ctx context.Context, profile VisualProfile, input, output string, width, height int) (string, error) {
+	if width <= 0 || height <= 0 {
+		return "", errors.New("SVG renderer needs positive reference dimensions")
+	}
 	rendererPath, err := filepath.Abs(profile.Renderer.Path)
 	if err != nil {
 		return "", fmt.Errorf("resolve SVG renderer: %w", err)
@@ -872,7 +884,12 @@ func renderSVG(ctx context.Context, profile VisualProfile, input, output string)
 	}
 	args := make([]string, len(profile.Renderer.Arguments))
 	for index, argument := range profile.Renderer.Arguments {
-		args[index] = strings.NewReplacer("{input}", input, "{output}", output).Replace(argument)
+		args[index] = strings.NewReplacer(
+			"{input}", input,
+			"{output}", output,
+			"{width}", strconv.Itoa(width),
+			"{height}", strconv.Itoa(height),
+		).Replace(argument)
 	}
 	if _, err := run(ctx, rendererPath, args...); err != nil {
 		return "", err
