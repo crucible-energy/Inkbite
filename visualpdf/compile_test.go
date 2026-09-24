@@ -165,9 +165,9 @@ if [ "$1" = "-v" ]; then echo "pdftocairo version 1.2.3"; exit 0; fi
 last=""
 for value in "$@"; do last="$value"; done
 case " $* " in *" -svg "*) {
-  printf '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="300" height="144"><defs><g id="glyph-0-0">'
+  printf '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="144"><defs><symbol id="glyph0-0">'
   i=0; while [ "$i" -lt 2048 ]; do printf '<path d="M0 0"/>'; i=$((i+1)); done
-  printf '</g></defs><g fill="black"><use xlink:href="#glyph-0-0" x="100" y="44"/></g></svg>'
+  printf '</symbol></defs><g fill="black"><use href="#glyph0-0" x="100" y="44"/></g></svg>'
 } > "$last";; *) cp "$FAKE_PNG" "${last}.png";; esac
 `)
 	renderer := filepath.Join(root, "renderer")
@@ -221,7 +221,7 @@ cp "$FAKE_WOFF2" "$output"
 	if !bytes.Contains(svg, []byte("@font-face")) || !bytes.Contains(svg, []byte("<text")) || !bytes.Contains(svg, []byte(">A</text>")) {
 		t.Fatalf("source-aware SVG does not contain positioned source text: %s", svg)
 	}
-	if bytes.Contains(svg, []byte("glyph-0-0")) {
+	if bytes.Contains(svg, []byte("glyph0-0")) {
 		t.Fatalf("source-aware SVG retains removable Poppler glyph outlines: %s", svg)
 	}
 	gotArguments, err := os.ReadFile(arguments)

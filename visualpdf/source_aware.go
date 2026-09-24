@@ -20,8 +20,8 @@ import (
 )
 
 var (
-	popplerGlyphDefinition = regexp.MustCompile(`(?i)\bid\s*=\s*["']glyph-[^"']+["']`)
-	popplerGlyphReference  = regexp.MustCompile(`(?i)\b(?:xlink:)?href\s*=\s*["']#glyph-[^"']+["']`)
+	popplerGlyphDefinition = regexp.MustCompile(`(?i)\bid\s*=\s*["']glyph(?:0-|-)[^"']+["']`)
+	popplerGlyphReference  = regexp.MustCompile(`(?i)\b(?:xlink:)?href\s*=\s*["']#glyph(?:0-|-)[^"']+["']`)
 )
 
 // sourceAwarePage is the source-text information that can be faithfully
@@ -342,8 +342,8 @@ func stripPopplerGlyphOutlines(document []byte) ([]byte, error) {
 		tag := document[tagStart:tagEnd]
 		name, closing, selfClosing := svgTagKind(tag)
 		switch {
-		case !closing && name == "g" && popplerGlyphDefinition.Match(tag):
-			elementEnd, err := svgElementEnd(document, tagStart, "g", selfClosing)
+		case !closing && (name == "g" || name == "symbol") && popplerGlyphDefinition.Match(tag):
+			elementEnd, err := svgElementEnd(document, tagStart, name, selfClosing)
 			if err != nil {
 				return nil, err
 			}
