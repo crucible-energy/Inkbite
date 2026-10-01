@@ -6,7 +6,10 @@ import (
 	"io"
 	"strings"
 
-	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/base"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/commonmark"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/table"
 	"golang.org/x/net/html"
 
 	"github.com/LynnColeArt/Inkbite"
@@ -96,7 +99,14 @@ func (c *Converter) ConvertString(input string) (inkbite.Result, error) {
 		return inkbite.Result{}, err
 	}
 
-	markdown, err := htmltomarkdown.ConvertString(rendered.String())
+	// The convenience converter enables CommonMark only. Register the existing
+	// table plugin explicitly so table boundaries are not flattened into text.
+	engine := converter.NewConverter(converter.WithPlugins(
+		base.NewBasePlugin(),
+		commonmark.NewCommonmarkPlugin(),
+		table.NewTablePlugin(),
+	))
+	markdown, err := engine.ConvertString(rendered.String())
 	if err != nil {
 		return inkbite.Result{}, err
 	}

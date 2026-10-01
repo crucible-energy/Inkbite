@@ -107,7 +107,7 @@ The repository currently includes the following built-in converter set:
 | Format | Status | Notes |
 | --- | --- | --- |
 | Plain text | Implemented | Normalized text output |
-| HTML | Implemented | DOM-to-Markdown conversion |
+| HTML | Implemented | DOM-to-Markdown conversion with explicit table plugin; rows/cells and inline links/emphasis retained |
 | CSV | Implemented | Markdown table output |
 | JSON and generic XML | Implemented via text path | Treated as text unless specialized routing applies |
 | RSS and Atom | Implemented | Feed and entry extraction |
@@ -121,6 +121,11 @@ The repository currently includes the following built-in converter set:
 | XLS | Implemented, basic scope | Legacy workbook tables with formatted dates and numerics; formula handling remains limited |
 
 ## Explicit Non-Goals for the Current MVP
+
+The 2026-10-01 [HTML table preservation check](docs/html-table-preservation.md)
+fixes previously flattened tables using the already-pinned converter library.
+Markdown remains a reduction; this is not a claim of arbitrary layout or
+round-trip HTML fidelity.
 
 The present project does not attempt to provide:
 
