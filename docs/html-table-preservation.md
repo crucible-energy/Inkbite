@@ -38,3 +38,28 @@ tables, complex spans, visual layout, and all-format extraction still need
 separate fidelity evidence. The owning library's span behavior remains in force;
 no fabricated layout score, percentage-complete claim, or performance metric is
 reported.
+
+## Review follow-through: bounded table rendering
+
+The review of <https://github.com/crucible-energy/Inkbite/pull/12> identified
+numeric-span allocation and aligned-padding amplification paths in the newly
+enabled dependency renderer. This was an actual dependency path, not a hosted
+service or cross-tenant exposure claim.
+
+The converter now bounds input/output at 32 MiB, token-driven DOM allocation,
+DOM nodes at 65,536, DOM depth at 256, and positive spans at 32. Before the
+dependency runs, a checked conservative rectangular-grid budget caps all table
+expansion at 65,536 cells across the document. Excessive inputs fail with
+`ErrHTMLLimit`; source spans are never silently rewritten into invented data.
+The same effective first attribute used by the dependency governs budgeting.
+Minimal padding prevents a single wide cell from padding every other row.
+
+Context cancellation is checked during preflight/DOM/table traversal and passed
+to the converter. Focused tests reject enormous individual/combined spans,
+validate bounded wide-cell output, and check cancellation/depth failures. The
+full `go test -mod=readonly ./...` suite passed after these controls.
+
+The expansion estimate is deliberately conservative, so some complex legitimate
+tables can exceed this profile. DOM parsing still uses the owning parser; these
+controls are resource bounds, not a hostile-process sandbox or arbitrary-format
+fidelity guarantee. Raw-source retention remains the ingestion owner's concern.
