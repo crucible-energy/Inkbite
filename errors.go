@@ -11,6 +11,8 @@ var (
 	ErrInvalidSource     = errors.New("invalid source")
 	ErrRemoteDisabled    = errors.New("remote fetching is disabled")
 	ErrRemoteTooLarge    = errors.New("remote response exceeds size limit")
+	// ErrResourceLimit is terminal: dispatch must not bypass it through fallback.
+	ErrResourceLimit = errors.New("conversion resource limit exceeded")
 )
 
 // InvalidSourceError reports an unsupported source type.

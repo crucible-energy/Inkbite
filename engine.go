@@ -117,6 +117,9 @@ func (e *Engine) convertResolved(
 	var attempts []ConversionError
 
 	for _, converter := range e.RegisteredConverters() {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
 		if _, err := reader.Seek(0, io.SeekStart); err != nil {
 			return Result{}, err
 		}
@@ -131,13 +134,17 @@ func (e *Engine) convertResolved(
 
 		result, err := converter.Convert(ctx, reader, info, opts)
 		if err != nil {
-			if errors.Is(err, ErrUnsupportedFormat) {
+			terminal := errors.Is(err, ErrResourceLimit) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+			if !terminal && errors.Is(err, ErrUnsupportedFormat) {
 				continue
 			}
 			attempts = append(attempts, ConversionError{
 				Converter: converter.Name(),
 				Err:       err,
 			})
+			if terminal {
+				return Result{}, FailedAttemptsError{Attempts: attempts}
+			}
 			continue
 		}
 

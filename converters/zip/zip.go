@@ -140,11 +140,11 @@ func (c *Converter) Convert(
 
 		result, err := c.engine.Convert(nestedCtx, entryData, entryInfo, opts)
 		if err != nil {
+			if errors.Is(err, errArchiveLimit) || errors.Is(err, inkbite.ErrResourceLimit) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return inkbite.Result{}, err
+			}
 			if errors.Is(err, inkbite.ErrUnsupportedFormat) {
 				continue
-			}
-			if errors.Is(err, errArchiveLimit) {
-				return inkbite.Result{}, err
 			}
 			continue
 		}

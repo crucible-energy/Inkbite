@@ -95,11 +95,14 @@ func (c *Converter) Accepts(
 }
 
 func (c *Converter) Convert(
-	_ context.Context,
+	ctx context.Context,
 	r io.ReadSeeker,
 	_ inkbite.StreamInfo,
 	_ inkbite.ConvertOptions,
 ) (inkbite.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return inkbite.Result{}, err
+	}
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return inkbite.Result{}, err
 	}
@@ -189,7 +192,7 @@ func (c *Converter) Convert(
 			return inkbite.Result{}, err
 		}
 
-		rendered, err := c.html.ConvertString(string(content))
+		rendered, err := c.html.Convert(ctx, bytes.NewReader(content), inkbite.StreamInfo{}, inkbite.ConvertOptions{})
 		if err != nil {
 			return inkbite.Result{}, err
 		}

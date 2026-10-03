@@ -2,6 +2,7 @@ package inkbite
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -14,6 +15,7 @@ type stubConverter struct {
 	priority float64
 	accepts  bool
 	markdown string
+	err      error
 }
 
 func (s stubConverter) Name() string {
@@ -29,7 +31,21 @@ func (s stubConverter) Accepts(context.Context, io.ReadSeeker, StreamInfo, Conve
 }
 
 func (s stubConverter) Convert(context.Context, io.ReadSeeker, StreamInfo, ConvertOptions) (Result, error) {
-	return Result{Markdown: s.markdown}, nil
+	return Result{Markdown: s.markdown}, s.err
+}
+
+func TestTerminalErrorsDominateUnsupportedAndFallback(t *testing.T) {
+	for _, terminal := range []error{ErrResourceLimit, context.Canceled, context.DeadlineExceeded} {
+		t.Run(terminal.Error(), func(t *testing.T) {
+			engine := New()
+			engine.RegisterConverter(stubConverter{name: "reject", accepts: true, err: errors.Join(ErrUnsupportedFormat, terminal)})
+			engine.RegisterConverter(stubConverter{name: "fallback", accepts: true, priority: 100, markdown: "bypassed"})
+			result, err := engine.Convert(context.Background(), []byte("source"), nil, ConvertOptions{})
+			if !errors.Is(err, terminal) || result.Markdown != "" {
+				t.Fatalf("terminal rejection was lost: %#v, %v", result, err)
+			}
+		})
+	}
 }
 
 func TestEnginePrefersLowerPriorityValue(t *testing.T) {
