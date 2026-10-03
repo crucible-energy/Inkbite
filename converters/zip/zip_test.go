@@ -4,7 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,6 +38,37 @@ func TestZIPConversionFixture(t *testing.T) {
 		if !strings.Contains(result.Markdown, fragment) {
 			t.Fatalf("expected %q in markdown, got %q", fragment, result.Markdown)
 		}
+	}
+}
+
+type rejectedMemberConverter struct{ err error }
+
+func (rejectedMemberConverter) Name() string      { return "rejected-member" }
+func (rejectedMemberConverter) Priority() float64 { return 1 }
+func (rejectedMemberConverter) Accepts(_ context.Context, _ io.ReadSeeker, info inkbite.StreamInfo, _ inkbite.ConvertOptions) bool {
+	return info.Extension == ".reject"
+}
+func (c rejectedMemberConverter) Convert(context.Context, io.ReadSeeker, inkbite.StreamInfo, inkbite.ConvertOptions) (inkbite.Result, error) {
+	return inkbite.Result{}, c.err
+}
+
+func TestZIPCannotSkipJoinedTerminalAndUnsupportedError(t *testing.T) {
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	writeZipFile(t, w, "source.reject", "source")
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, terminal := range []error{inkbite.ErrResourceLimit, context.Canceled, context.DeadlineExceeded} {
+		t.Run(terminal.Error(), func(t *testing.T) {
+			engine := inkbite.New()
+			builtins.RegisterDefaultConverters(engine)
+			engine.RegisterConverter(rejectedMemberConverter{err: errors.Join(inkbite.ErrUnsupportedFormat, terminal)})
+			result, err := engine.Convert(context.Background(), buf.Bytes(), &inkbite.StreamInfo{Extension: ".zip"}, inkbite.ConvertOptions{})
+			if !errors.Is(err, terminal) || result.Markdown != "" {
+				t.Fatalf("ZIP skipped terminal member error: %#v, %v", result, err)
+			}
+		})
 	}
 }
 

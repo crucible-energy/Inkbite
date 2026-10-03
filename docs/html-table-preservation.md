@@ -101,3 +101,9 @@ Feed XML/EPUB/archive acquisition and parsing have separate resource behavior;
 these HTML controls are not a universal archive or feed-memory ceiling. Existing
 reader calls are not interruptible while blocked. HTML reduction is not a general
 HTML sanitization service or a promise about executable downstream rendering.
+
+Review follow-through: terminal errors take precedence even when a registered
+converter returns an aggregate matching both `ErrUnsupportedFormat` and a limit
+or cancellation sentinel. Engine and ZIP regression fixtures use joined errors
+to verify this precedence, preventing an unsupported-format check from masking
+rejection. Full Go tests and `go vet` passed after the precedence change.
