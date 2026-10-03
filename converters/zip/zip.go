@@ -143,7 +143,7 @@ func (c *Converter) Convert(
 			if errors.Is(err, inkbite.ErrUnsupportedFormat) {
 				continue
 			}
-			if errors.Is(err, errArchiveLimit) {
+			if errors.Is(err, errArchiveLimit) || errors.Is(err, inkbite.ErrResourceLimit) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return inkbite.Result{}, err
 			}
 			continue

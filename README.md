@@ -127,6 +127,11 @@ fixes previously flattened tables using the already-pinned converter library.
 Markdown remains a reduction; this is not a claim of arbitrary layout or
 round-trip HTML fidelity.
 
+HTML resource-limit failures are terminal (`ErrResourceLimit`, with
+`htmlconv.ErrHTMLLimit` preserved): feed and archive consumers do not return the
+rejected HTML through a raw-text fallback. Successfully removed script/style-only
+feed content stays empty. See the same check for limits and cancellation scope.
+
 The present project does not attempt to provide:
 
 - exact parity with Python MarkItDown

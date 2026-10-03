@@ -63,3 +63,41 @@ The expansion estimate is deliberately conservative, so some complex legitimate
 tables can exceed this profile. DOM parsing still uses the owning parser; these
 controls are resource bounds, not a hostile-process sandbox or arbitrary-format
 fidelity guarantee. Raw-source retention remains the ingestion owner's concern.
+
+## 2026-10-03 — Keep rejection terminal through consumers
+
+### User Experience Findings
+
+The next review found RSS/Atom's existing raw-HTML fallback: a field rejected by
+HTML preflight could become successful Markdown unchanged. Inspection also found
+that default engine dispatch could retry a rejected HTML/feed as plain text, and
+ZIP conversion could silently skip a rejected HTML member. A successful result
+therefore did not prove the conversion controls had been respected.
+
+### Engineering Decisions
+
+- Propagate embedded HTML errors with feed-field context and return no partial
+  success. Do not replace rejected content with a description/summary fallback.
+  A successfully empty conversion stays empty; script/style-only content must not
+  reappear simply because its reduction produced no text.
+- Expose `inkbite.ErrResourceLimit` as a terminal dispatch error; `ErrHTMLLimit`
+  wraps it while preserving `errors.Is(err, htmlconv.ErrHTMLLimit)`. Resource
+  rejection and cancellation/deadline errors cannot fall through to another
+  converter or disappear inside ZIP-member conversion. Ordinary converter
+  failures retain the existing retry behavior.
+- Pass caller context through existing HTML `Convert` in RSS/Atom and EPUB rather
+  than adding another public string-conversion API.
+
+### Validation
+
+Focused fixtures cover all six HTML-bearing feed-field paths, empty/script-only
+output, normal table retention, cancellation, and default-engine HTML/RSS/Atom/XML
+and ZIP-member dispatch. They assert the rejection identity and absence of raw or
+partial output, not a coverage percentage.
+
+### Known Limitations
+
+Feed XML/EPUB/archive acquisition and parsing have separate resource behavior;
+these HTML controls are not a universal archive or feed-memory ceiling. Existing
+reader calls are not interruptible while blocked. HTML reduction is not a general
+HTML sanitization service or a promise about executable downstream rendering.

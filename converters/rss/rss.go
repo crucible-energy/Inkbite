@@ -3,6 +3,7 @@ package rssconv
 import (
 	"context"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"strings"
 
@@ -106,11 +107,14 @@ func (c *Converter) Accepts(
 }
 
 func (c *Converter) Convert(
-	_ context.Context,
+	ctx context.Context,
 	r io.ReadSeeker,
 	info inkbite.StreamInfo,
 	_ inkbite.ConvertOptions,
 ) (inkbite.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return inkbite.Result{}, err
+	}
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return inkbite.Result{}, err
 	}
@@ -132,25 +136,29 @@ func (c *Converter) Convert(
 		if err := xml.Unmarshal([]byte(decoded), &feed); err != nil {
 			return inkbite.Result{}, err
 		}
-		return c.convertRSS(feed), nil
+		return c.convertRSS(ctx, feed)
 	case "feed":
 		var feed atomFeed
 		if err := xml.Unmarshal([]byte(decoded), &feed); err != nil {
 			return inkbite.Result{}, err
 		}
-		return c.convertAtom(feed), nil
+		return c.convertAtom(ctx, feed)
 	default:
 		return inkbite.Result{}, inkbite.UnsupportedFormatError{Info: info}
 	}
 }
 
-func (c *Converter) convertRSS(feed rssFeed) inkbite.Result {
+func (c *Converter) convertRSS(ctx context.Context, feed rssFeed) (inkbite.Result, error) {
 	var parts []string
 	title := strings.TrimSpace(feed.Channel.Title)
 	if title != "" {
 		parts = append(parts, "# "+title)
 	}
-	if desc := c.renderMaybeHTML(feed.Channel.Description); desc != "" {
+	desc, err := c.renderMaybeHTML(ctx, feed.Channel.Description)
+	if err != nil {
+		return inkbite.Result{}, fmt.Errorf("RSS channel description: %w", err)
+	}
+	if desc != "" {
 		parts = append(parts, desc)
 	}
 	for _, item := range feed.Channel.Items {
@@ -165,7 +173,11 @@ func (c *Converter) convertRSS(feed rssFeed) inkbite.Result {
 		if content == "" {
 			content = strings.TrimSpace(item.Description)
 		}
-		if rendered := c.renderMaybeHTML(content); rendered != "" {
+		rendered, err := c.renderMaybeHTML(ctx, content)
+		if err != nil {
+			return inkbite.Result{}, fmt.Errorf("RSS item content: %w", err)
+		}
+		if rendered != "" {
 			section = append(section, rendered)
 		}
 		if len(section) > 0 {
@@ -176,16 +188,20 @@ func (c *Converter) convertRSS(feed rssFeed) inkbite.Result {
 	return inkbite.Result{
 		Markdown: strings.Join(parts, "\n\n"),
 		Title:    title,
-	}
+	}, nil
 }
 
-func (c *Converter) convertAtom(feed atomFeed) inkbite.Result {
+func (c *Converter) convertAtom(ctx context.Context, feed atomFeed) (inkbite.Result, error) {
 	var parts []string
 	title := strings.TrimSpace(feed.Title)
 	if title != "" {
 		parts = append(parts, "# "+title)
 	}
-	if subtitle := c.renderMaybeHTML(feed.Subtitle); subtitle != "" {
+	subtitle, err := c.renderMaybeHTML(ctx, feed.Subtitle)
+	if err != nil {
+		return inkbite.Result{}, fmt.Errorf("Atom subtitle: %w", err)
+	}
+	if subtitle != "" {
 		parts = append(parts, subtitle)
 	}
 	for _, entry := range feed.Entries {
@@ -200,7 +216,11 @@ func (c *Converter) convertAtom(feed atomFeed) inkbite.Result {
 		if content == "" {
 			content = strings.TrimSpace(entry.Summary)
 		}
-		if rendered := c.renderMaybeHTML(content); rendered != "" {
+		rendered, err := c.renderMaybeHTML(ctx, content)
+		if err != nil {
+			return inkbite.Result{}, fmt.Errorf("Atom entry content: %w", err)
+		}
+		if rendered != "" {
 			section = append(section, rendered)
 		}
 		if len(section) > 0 {
@@ -211,21 +231,25 @@ func (c *Converter) convertAtom(feed atomFeed) inkbite.Result {
 	return inkbite.Result{
 		Markdown: strings.Join(parts, "\n\n"),
 		Title:    title,
-	}
+	}, nil
 }
 
-func (c *Converter) renderMaybeHTML(value string) string {
+func (c *Converter) renderMaybeHTML(ctx context.Context, value string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return ""
+		return "", nil
 	}
 	if strings.Contains(value, "<") && strings.Contains(value, ">") {
-		result, err := c.html.ConvertString(value)
-		if err == nil && strings.TrimSpace(result.Markdown) != "" {
-			return strings.TrimSpace(result.Markdown)
+		result, err := c.html.Convert(ctx, strings.NewReader(value), inkbite.StreamInfo{}, inkbite.ConvertOptions{})
+		if err != nil {
+			return "", err
 		}
+		return strings.TrimSpace(result.Markdown), nil
 	}
-	return value
+	return value, nil
 }
 
 func rootElement(r io.ReadSeeker) (string, error) {

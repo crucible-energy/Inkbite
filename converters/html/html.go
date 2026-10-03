@@ -3,7 +3,7 @@ package htmlconv
 import (
 	"bytes"
 	"context"
-	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -28,7 +28,7 @@ const (
 )
 
 // ErrHTMLLimit identifies an input or table expansion outside the bounded profile.
-var ErrHTMLLimit = errors.New("HTML conversion resource limit exceeded")
+var ErrHTMLLimit = fmt.Errorf("HTML: %w", inkbite.ErrResourceLimit)
 
 var (
 	htmlExtensions = map[string]struct{}{
