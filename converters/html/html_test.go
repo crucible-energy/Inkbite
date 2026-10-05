@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/LynnColeArt/Inkbite"
+	"golang.org/x/net/html"
 )
 
 func TestHTMLConversion(t *testing.T) {
@@ -74,7 +75,7 @@ func TestHTMLTableWithoutHeaderDoesNotPromoteDataToHeading(t *testing.T) {
 }
 
 func TestHTMLRejectsSpanExpansionBeforeRendering(t *testing.T) {
-	for _, attr := range []string{`colspan="2147483647"`, `rowspan="2147483647"`, `colspan="33"`, `rowspan="33"`} {
+	for _, attr := range []string{`colspan="2147483647"`, `rowspan="2147483647"`, `colspan="65537"`, `rowspan="65537"`} {
 		_, err := New().ConvertString(`<table><tr><td ` + attr + `>source</td></tr></table>`)
 		if !errors.Is(err, ErrHTMLLimit) {
 			t.Fatalf("expected checked limit for %s, got %v", attr, err)
@@ -87,6 +88,75 @@ func TestHTMLRejectsSpanExpansionBeforeRendering(t *testing.T) {
 	_, err = New().ConvertString(`<table>` + strings.Repeat(`<tr><td colspan="32" colspan="1" rowspan="32">x</td></tr>`, 100) + `</table>`)
 	if !errors.Is(err, ErrHTMLLimit) {
 		t.Fatalf("duplicate attributes changed the effective span budget: %v", err)
+	}
+}
+
+func TestBoundedWideAndRepeatedSourceSpans(t *testing.T) {
+	for _, input := range []string{
+		`<table><tr><td colspan="39">Actual wide source heading</td></tr><tr><td>Retained data</td></tr></table>`,
+		`<table>` + strings.Repeat(`<tr><td colspan="3">Source</td><td colspan="3">Retained</td></tr>`, 300) + `</table>`,
+	} {
+		result, err := New().ConvertString(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(result.Markdown, "Retained") || len(result.Markdown) > 100000 {
+			t.Fatalf("bounded source content lost or amplified: %d bytes", len(result.Markdown))
+		}
+	}
+}
+
+func TestRowspanExpansionAndDocumentGridStillBounded(t *testing.T) {
+	for _, input := range []string{
+		`<table><tr><td rowspan="65536">Source</td></tr></table>`,
+		`<table><tr><td colspan="65536">Source</td></tr></table>`,
+		strings.Repeat(`<table><tr><td colspan="39">Source</td></tr></table>`, 1000),
+		`<table>` + strings.Repeat(`<tr><td colspan="256" rowspan="256">Source</td></tr>`, 2) + `</table>`,
+	} {
+		_, err := New().ConvertString(input)
+		if !errors.Is(err, ErrHTMLLimit) {
+			t.Fatalf("expected terminal expansion limit, got %v", err)
+		}
+	}
+}
+
+func TestDenseInsertShiftWorkIsRejectedBeforeRendering(t *testing.T) {
+	// The rectangular footprint alone is below the cell budget, but the
+	// overlapping row insertions would move over two million cell references.
+	input := `<table><tr>` + strings.Repeat(`<td rowspan="64">source</td>`, 64) + `</tr>` +
+		strings.Repeat(`<tr>`+strings.Repeat(`<td></td>`, 600)+`</tr>`, 63) + `</table>`
+	_, err := New().ConvertString(input)
+	if !errors.Is(err, ErrHTMLLimit) {
+		t.Fatalf("unbounded insert work reached the renderer: %v", err)
+	}
+}
+
+func TestSpanFootprintBoundsActualRenderedGrid(t *testing.T) {
+	for _, input := range []string{
+		`<table><thead><tr><th colspan="4">Heading</th></tr></thead><tr><td rowspan="3" colspan="2">A</td><td>B</td></tr><tr><td colspan="3">C</td></tr></table>`,
+		`<table><tr><td colspan="5" rowspan="3">A</td><td rowspan="2">B</td></tr><tr><td colspan="3">C</td></tr><tr><td>D</td></tr></table>`,
+	} {
+		doc, err := html.Parse(strings.NewReader(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		footprint, err := tableFootprint(context.Background(), findFirstNode(doc, "table"), maxTableGridCells)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := New().ConvertString(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cells := 0
+		for _, line := range strings.Split(result.Markdown, "\n") {
+			if strings.HasPrefix(line, "|") && strings.Trim(line, "| :-") != "" {
+				cells += strings.Count(line, "|") - 1
+			}
+		}
+		if cells == 0 || cells > footprint || footprint > maxTableGridCells {
+			t.Fatalf("rendered grid escaped preflight: rendered=%d footprint=%d", cells, footprint)
+		}
 	}
 }
 

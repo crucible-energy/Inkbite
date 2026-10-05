@@ -2,6 +2,9 @@
 
 Observed and implemented: 2026-10-01.
 
+Current continuation: 2026-10-05; the final section updates the span/expansion
+guard while retaining raw-source authority and terminal resource rejection.
+
 ## User Experience Findings
 
 Trufflehound's real document-reduction qualification found that a source HTML
@@ -107,3 +110,61 @@ converter returns an aggregate matching both `ErrUnsupportedFormat` and a limit
 or cancellation sentinel. Engine and ZIP regression fixtures use joined errors
 to verify this precedence, preventing an unsupported-format check from masking
 rejection. Full Go tests and `go vet` passed after the precedence change.
+
+## 2026-10-05 — Admit bounded real filing tables without weakening rejection
+
+### User Experience Findings
+
+Trufflehound's retained SEC primary 10-K was rejected by the span-32 guard. Two
+source cells declare `colspan="39"`; repeated small spans also exposed the old
+estimator's multiplication of every modification by every row. That conservative
+estimate rejected ordinary bounded table structure, not just unsafe expansion.
+
+The candidate output also exposes concatenated hidden inline-XBRL context at its
+start. That is a separate readability/semantic-reduction finding: successful
+table rendering and exact replay do not establish visible-text or accounting
+interpretation fidelity. The original source remains in the ingestion owner.
+
+### Engineering Decisions
+
+- Model the pinned html-to-markdown v2.5.0 renderer's header/row selection,
+  reverse modification groups, grow-before-insert and final rectangular padding
+  with **row lengths only**. No expanded cell payloads are allocated during
+  preflight and no source spans or data are rewritten to force success.
+- Keep the document-wide 65,536-cell grid budget, bounded token/DOM/depth/input/
+  output profile, minimal padding and typed terminal errors. Positive spans are
+  individually bounded by that cell ceiling and checked area arithmetic prevents
+  overflow before multiplication. They must fit the actual aggregate grid.
+- Bound expanded modification count at 65,536 and insertion shift work at
+  2,097,152 cell references per table before entering the dependency. The latter
+  prevents a small final rectangle hiding expensive overlapping inserts. These
+  are enforceable budgets, not throughput or energy measurements.
+- Empty-row removal and nested-table fallback are ignored conservatively in
+  budgeting. The model is version-specific; a dependency upgrade needs renewed
+  selector/expansion parity checks. Invocation/ownership stays scoped per call.
+- Feed/dispatch terminal-rejection fixtures now use a genuinely over-budget
+  span (`65537`), because span `33` is valid under the new aggregate guard. All
+  rejection/no-raw-fallback assertions remain in force.
+
+### Validation
+
+- Full `go test -mod=readonly ./...` and `go vet -mod=readonly ./...` passed.
+- Meaningful new fixtures retain span-39 headings and 300 repeated bounded rows,
+  reject extreme spans, cumulative document grids and dense insertion work, and
+  compare computed footprints with actual rendered overlapping/header grids.
+- Trufflehound's actual candidate CLI reduced the **same original primary source**
+  into `document-aa8d68f1ac9bb207d5327b3ee702e13c`; schema, source proof,
+  independent verification and byte-identical replay passed. The old rejected
+  document remains retained. Candidate binary SHA-256:
+  `74cb8df4dc0648727616c047b2bdfc666311927fbb01dbd2b974c707abad5f5e`.
+  Document-manifest SHA-256:
+  `6ea388d1d276dd47b9e56acffe4455be2546820e7d68fee40a428b943e162dea`.
+  This is one named representation/replay proof, not a corpus-fidelity sample.
+
+### Known Limitations
+
+This does not add OCR, resolve publisher byte-count discrepancies, sanitize all
+HTML, reconstruct arbitrary nested layout or certify financial/legal semantics.
+The context prefix and complex-table reduction need separate quality work. The
+existing parser/dependency/executable trust and blocked-reader limits remain;
+these are bounded conversion guards, not a hosted sandbox or deployment claim.

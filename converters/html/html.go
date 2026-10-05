@@ -23,8 +23,9 @@ const (
 	maxHTMLBytes      = 32 << 20
 	maxHTMLNodes      = 65536
 	maxHTMLDepth      = 256
-	maxTableSpan      = 32
+	maxTableSpan      = maxTableGridCells
 	maxTableGridCells = 65536
+	maxTableShiftWork = 2 << 20 // cell references shifted by dependency inserts
 )
 
 // ErrHTMLLimit identifies an input or table expansion outside the bounded profile.
@@ -203,81 +204,11 @@ func validateDOM(ctx context.Context, root *html.Node) error {
 			return err
 		}
 		if node.Type == html.ElementNode && node.Data == "table" {
-			rows, maxCells, modifications, maxRowSpan := 0, 0, 0, 1
-			var walk func(*html.Node) error
-			walk = func(n *html.Node) error {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				if n.Type == html.ElementNode && n.Data == "tr" {
-					rows++
-					cells := 0
-					var collect func(*html.Node) error
-					collect = func(cell *html.Node) error {
-						if cell.Type == html.ElementNode && (cell.Data == "td" || cell.Data == "th") {
-							cells++
-							rowSpan, colSpan := 1, 1
-							rowSeen, colSeen := false, false
-							for _, attr := range cell.Attr {
-								if attr.Key != "rowspan" && attr.Key != "colspan" {
-									continue
-								}
-								value, err := strconv.Atoi(attr.Val)
-								if err != nil || value < 1 {
-									value = 1
-								}
-								if value > maxTableSpan {
-									return ErrHTMLLimit
-								}
-								// The dependency uses the first attribute. Check every
-								// value, but budget the same effective span it renders.
-								if attr.Key == "rowspan" && !rowSeen {
-									rowSpan, rowSeen = value, true
-								}
-								if attr.Key == "colspan" && !colSeen {
-									colSpan, colSeen = value, true
-								}
-							}
-							added := rowSpan*colSpan - 1
-							if added > maxTableGridCells-modifications {
-								return ErrHTMLLimit
-							}
-							modifications += added
-							if rowSpan > maxRowSpan {
-								maxRowSpan = rowSpan
-							}
-						}
-						for child := cell.FirstChild; child != nil; child = child.NextSibling {
-							if err := collect(child); err != nil {
-								return err
-							}
-						}
-						return nil
-					}
-					if err := collect(n); err != nil {
-						return err
-					}
-					if cells > maxCells {
-						maxCells = cells
-					}
-				}
-				for child := n.FirstChild; child != nil; child = child.NextSibling {
-					if err := walk(child); err != nil {
-						return err
-					}
-				}
-				return nil
-			}
-			if err := walk(node); err != nil {
+			used, err := tableFootprint(ctx, node, gridBudget)
+			if err != nil {
 				return err
 			}
-			// Conservative dependency bound: modifications can grow/shift a row;
-			// fillUpRows then allocates a rectangular grid including a header row.
-			height, width := rows+maxRowSpan+1, maxCells+modifications
-			if width > 0 && height > gridBudget/width {
-				return ErrHTMLLimit
-			}
-			gridBudget -= height * width
+			gridBudget -= used
 		}
 		for child := node.FirstChild; child != nil; child = child.NextSibling {
 			if err := check(child); err != nil {
@@ -287,6 +218,134 @@ func validateDOM(ctx context.Context, root *html.Node) error {
 		return nil
 	}
 	return check(root)
+}
+
+// tableFootprint models the pinned v2.5.0 renderer's row selection, reverse
+// modification groups, grow-before-insert and final rectangular padding using
+// row lengths only. It never allocates expanded content or rewrites source spans.
+// Counting every colspan against every row rejected bounded, ordinary filings.
+// Empty-row removal and nested-table fallback are ignored conservatively.
+func tableFootprint(ctx context.Context, node *html.Node, budget int) (int, error) {
+	header := findFirstNode(node, "thead")
+	if header != nil {
+		header = findFirstNode(header, "tr")
+	}
+	if header == nil {
+		if th := findFirstNode(node, "th"); th != nil {
+			header = th.Parent
+		}
+	}
+	rows := []*html.Node{header} // nil reserves the renderer's empty header row
+	var selectRows func(*html.Node)
+	selectRows = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "tr" && n != header {
+			rows = append(rows, n)
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			selectRows(child)
+		}
+	}
+	selectRows(node)
+	if len(rows) > maxTableGridCells {
+		return 0, ErrHTMLLimit
+	}
+	type span struct{ column, height, width int }
+	groups := make([][]span, len(rows))
+	lengths := make([]int, len(rows))
+	modifications := 0
+	for y, row := range rows {
+		var collect func(*html.Node) error
+		collect = func(cell *html.Node) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if cell.Type == html.ElementNode && (cell.Data == "td" || cell.Data == "th") {
+				height, width := 1, 1
+				rowSeen, colSeen := false, false
+				for _, attr := range cell.Attr {
+					if attr.Key != "rowspan" && attr.Key != "colspan" {
+						continue
+					}
+					value, err := strconv.Atoi(attr.Val)
+					if err != nil || value < 1 {
+						value = 1 // same fallback as the dependency
+					}
+					if value > maxTableSpan {
+						return ErrHTMLLimit
+					}
+					if attr.Key == "rowspan" && !rowSeen {
+						height, rowSeen = value, true
+					}
+					if attr.Key == "colspan" && !colSeen {
+						width, colSeen = value, true
+					}
+				}
+				// Check before multiplication (including on 32-bit targets).
+				if height > (maxTableGridCells-modifications+1)/width || y+height > maxTableGridCells {
+					return ErrHTMLLimit
+				}
+				modifications += height*width - 1
+				if height > 1 || width > 1 {
+					groups[y] = append(groups[y], span{lengths[y], height, width})
+				}
+				lengths[y]++
+			}
+			for child := cell.FirstChild; child != nil; child = child.NextSibling {
+				if err := collect(child); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if row != nil {
+			if err := collect(row); err != nil {
+				return 0, err
+			}
+		}
+	}
+	shiftWork := 0
+	insert := func(y, x int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		for len(lengths) <= y {
+			lengths = append(lengths, 0)
+		}
+		shifted := max(lengths[y]-x, 0)
+		if shifted > maxTableShiftWork-shiftWork {
+			return ErrHTMLLimit
+		}
+		shiftWork += shifted
+		lengths[y] = max(lengths[y], x) + 1
+		if lengths[y] > budget {
+			return ErrHTMLLimit
+		}
+		return nil
+	}
+	for y := len(groups) - 1; y >= 0; y-- {
+		for _, cell := range groups[y] {
+			for dx := 1; dx < cell.width; dx++ {
+				if err := insert(y, cell.column+dx); err != nil {
+					return 0, err
+				}
+			}
+			for dy := 1; dy < cell.height; dy++ {
+				for dx := 0; dx < cell.width; dx++ {
+					if err := insert(y+dy, cell.column+dx); err != nil {
+						return 0, err
+					}
+				}
+			}
+		}
+	}
+	width := 0
+	for _, length := range lengths {
+		width = max(width, length)
+	}
+	if width > 0 && len(lengths) > budget/width {
+		return 0, ErrHTMLLimit
+	}
+	return len(lengths) * width, nil
 }
 
 func removeNodes(node *html.Node, names ...string) {

@@ -31,7 +31,7 @@ func TestRegisterDefaultConverters(t *testing.T) {
 func TestDefaultDispatchCannotBypassHTMLLimit(t *testing.T) {
 	engine := inkbite.New()
 	RegisterDefaultConverters(engine)
-	html := `<table><tr><td colspan="33">source</td></tr></table><script>not-converted</script>`
+	html := `<table><tr><td colspan="65537">source</td></tr></table><script>not-converted</script>`
 	rss := `<rss><channel><item><description><![CDATA[` + html + `]]></description></item></channel></rss>`
 	atom := `<feed><entry><content><![CDATA[` + html + `]]></content></entry></feed>`
 	var archive bytes.Buffer
