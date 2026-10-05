@@ -46,7 +46,7 @@ func TestRSSConversion(t *testing.T) {
 }
 
 func TestFeedHTMLRejectionReturnsNoPartialResult(t *testing.T) {
-	badHTML := `<table><tr><td colspan="33">source</td></tr></table><script>not-converted</script>`
+	badHTML := `<table><tr><td colspan="65537">source</td></tr></table><script>not-converted</script>`
 	for _, tc := range []struct {
 		name, format string
 	}{

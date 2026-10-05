@@ -132,6 +132,12 @@ HTML resource-limit failures are terminal (`ErrResourceLimit`, with
 rejected HTML through a raw-text fallback. Successfully removed script/style-only
 feed content stays empty. See the same check for limits and cancellation scope.
 
+The 2026-10-05 continuation qualifies bounded span-39 and repeated-row source
+tables using checked renderer-footprint/shift-work preflight. The 65,536-cell
+document budget remains enforced; this is not arbitrary-layout or semantic
+fidelity. The named SEC 10-K now reduces and replays, with its hidden inline-XBRL
+context still an explicit readability limitation.
+
 The present project does not attempt to provide:
 
 - exact parity with Python MarkItDown
