@@ -1,5 +1,55 @@
 # Inkbite
 
+## Start here
+
+Inkbite converts text-oriented documents to Markdown for retrieval, indexing
+and model context preparation. The current library and CLI are implemented in
+Go. New repository-owned implementation must follow the Zig policy in [AGENTS.md](AGENTS.md); continued use of the Go interface is not a
+claim that a Zig replacement has shipped.
+
+From a source checkout, inspect the build and toolchain requirements first:
+
+```sh
+sed -n '1,24p' go.mod
+sed -n '1,24p' Makefile
+```
+
+These commands only display tracked configuration. Building requires `make`
+and Go. The module declares Go 1.25.9 and selects toolchain Go 1.26.5; with
+`GOTOOLCHAIN=auto`, Go may download the selected toolchain. Building may also
+fetch module dependencies when they are not cached. If downloads are not
+permitted, provision the selected toolchain and dependencies first.
+
+Then build and inspect the registered converters:
+
+```sh
+make build
+./bin/inkbite --list-formats
+```
+
+`make build` writes the checkout-local `bin/inkbite`; it does not install a
+command on `PATH`. The next command lists converter names and priorities and
+returns without converting a document or retrieving a remote source. The
+examples below use `inkbite` for a binary already on `PATH`; from this checkout,
+use `./bin/inkbite` instead.
+
+For a local conversion, pass an authorized input file to `./bin/inkbite`; its
+Markdown goes to standard output unless `-o` selects a file. HTTP retrieval is
+opt-in through `--http`. Run `make ci` for the repository's tests, vet and build
+checks before review.
+
+- [Implemented format scope](#implemented-scope) describes reduced-fidelity cases.
+- [Managed components](#managed-components) are optional setup; their OCR helper
+  foundation is not OCR-backed document conversion support.
+- [Visual-PDF compilation](#optional-visual-pdf-compiler) is a separate external
+  toolchain/profile workflow. The checked-in v3 profile is intentionally
+  unqualified and cannot serve as a ready-to-run example.
+- [Library use](#library-use) retains the current compatibility module path.
+
+The detailed research aims and implementation notes below are preserved.
+Runtime, validation and fidelity claims require evidence for the relevant
+version.
+
 ## Abstract
 
 Inkbite is a Go-native document-to-Markdown extraction system intended for
